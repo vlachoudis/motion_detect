@@ -1,7 +1,10 @@
 
 /*
- * $Id: motion_detect.c,v 1.1 2006/01/10 14:13:32 bnv Exp $
+ * $Id: motion_detect.c,v 1.2 2006/01/10 15:24:32 bnv Exp $
  * $Log: motion_detect.c,v $
+ * Revision 1.2  2006/01/10 15:24:32  bnv
+ * Added: JPEG exporting
+ *
  * Revision 1.1  2006/01/10 14:13:32  bnv
  * Initial revision
  *
@@ -25,6 +28,17 @@
 #include <time.h>
 #include <sys/time.h>
 #include <sys/unistd.h>
+#include <stdio.h>
+/*
+ * Include file for users of JPEG library.
+ * You will need to have included system headers that define at least
+ * the typedefs FILE and size_t before you can include jpeglib.h.
+ * (stdio.h is sufficient on ANSI-conforming systems.)
+ * You may also wish to include "jerror.h".
+ */
+#include "jpeglib.h"
+#include "jerror.h"
+#include <setjmp.h>
 
 #define MAX_PORTS 4
 #define MAX_RESETS 10
@@ -36,7 +50,7 @@ double	threshold    = 200.0;
 int	time2sleep   = 5;
 int	totalTime    = 86400;
 
-char *g_filename = "image-%08d.ppm";
+char *g_filename = "image-%08d.jpg";
 u_int64_t g_guid = 0;
 
 static struct option long_options[] = {
@@ -88,11 +102,10 @@ void get_options(int argc, char *argv[])
 		g_filename = argv[optind];
 
 	printf("Options\n");
-	printf("\tGuid\t%lu\n",g_guid);
-	printf("\tThreshold\t%ld\n",threshold);
-	printf("\tsleep\t%ld\n",time2sleep);
-	printf("\ttime\t%ld\n",time);
-	printf("\tfilename\t%s\n",g_filename);
+	printf("\tGuid\t\t%lu\n",(unsigned long)g_guid);
+	printf("\tThreshold\t%g\n",threshold);
+	printf("\tSleep Time\t%d s\n",time2sleep);
+	printf("\tFilename\t%s\n\n",g_filename);
 } /* get_options */
 
 /* --- compareFrames --- */
@@ -149,10 +162,138 @@ long timeStamp()
 		(long)tmdata->tm_sec;
 } /* timeStamp */
 
+/* --- writeJPEGFile --- */
+GLOBAL(void) writeJPEGFile(char *filename, int quality, dc1394_cameracapture *camera)
+{
+	/* This struct contains the JPEG compression parameters and pointers to
+	 * working space (which is allocated as needed by the JPEG library).
+	 * It is possible to have several such structures, representing multiple
+	 * compression/decompression processes, in existence at once.  We refer
+	 * to any one struct (and its associated working data) as a "JPEG object".
+	 */
+	struct jpeg_compress_struct cinfo;
+	/* This struct represents a JPEG error handler.  It is declared separately
+	 * because applications often want to supply a specialized error handler
+	 * (see the second half of this file for an example).  But here we just
+	 * take the easy way out and use the standard error handler, which will
+	 * print a message on stderr and call exit() if compression fails.
+	 * Note that this struct must live as long as the main JPEG parameter
+	 * struct, to avoid dangling-pointer problems.
+	 */
+	struct jpeg_error_mgr jerr;
+	/* More stuff */
+	FILE * outfile;		/* target file */
+	JSAMPROW row_pointer[1];	/* pointer to JSAMPLE row[s] */
+	int row_stride;		/* physical row width in image buffer */
+
+	/* Step 1: allocate and initialize JPEG compression object */
+
+	/* We have to set up the error handler first, in case the initialization
+	 * step fails.  (Unlikely, but it could happen if you are out of memory.)
+	 * This routine fills in the contents of struct jerr, and returns jerr's
+	 * address which we place into the link field in cinfo.
+	 */
+	cinfo.err = jpeg_std_error(&jerr);
+	/* Now we can initialize the JPEG compression object. */
+	jpeg_create_compress(&cinfo);
+
+	/* Step 2: specify data destination (eg, a file) */
+	/* Note: steps 2 and 3 can be done in either order. */
+
+	/* Here we use the library-supplied code to send compressed data to a
+	 * stdio stream.  You can also write your own code to do something else.
+	 * VERY IMPORTANT: use "b" option to fopen() if you are on a machine that
+	 * requires it in order to write binary files.
+	 */
+	if ((outfile = fopen(filename, "wb")) == NULL) {
+		fprintf(stderr, "can't open %s\n", filename);
+		exit(1);
+	}
+	jpeg_stdio_dest(&cinfo, outfile);
+
+	/* Step 3: set parameters for compression */
+
+	/* First we supply a description of the input image.
+	 * Four fields of the cinfo struct must be filled in:
+	 */
+	/* image width and height, in pixels */
+	cinfo.image_width = camera->frame_width;
+	cinfo.image_height = camera->frame_height;
+	cinfo.input_components = 3;		/* # of color components per pixel */
+	cinfo.in_color_space = JCS_RGB;	/* colorspace of input image */
+	/* Now use the library's routine to set default compression parameters.
+	 * (You must set at least cinfo.in_color_space before calling this,
+	 * since the defaults depend on the source color space.)
+	 */
+	jpeg_set_defaults(&cinfo);
+	/* Now you can set any non-default parameters you wish to.
+	 * Here we just illustrate the use of quality (quantization table) scaling:
+	 */
+	jpeg_set_quality(&cinfo, quality, TRUE /* limit to baseline-JPEG values */);
+
+	/* Step 4: Start compressor */
+
+	/* TRUE ensures that we will write a complete interchange-JPEG file.
+	 * Pass TRUE unless you are very sure of what you're doing.
+	 */
+	jpeg_start_compress(&cinfo, TRUE);
+
+	/* Step 5: while (scan lines remain to be written) */
+	/*           jpeg_write_scanlines(...); */
+
+	/* Here we use the library's state variable cinfo.next_scanline as the
+	 * loop counter, so that we don't have to keep track ourselves.
+	 * To keep things simple, we pass one scanline per call; you can pass
+	 * more if you wish, though.
+	 */
+	row_stride = camera->frame_width * 3;	/* JSAMPLEs per row in image_buffer */
+
+	while (cinfo.next_scanline < cinfo.image_height) {
+		/* jpeg_write_scanlines expects an array of pointers to scanlines.
+		 * Here the array is only one element long, but you could pass
+		 * more than one scanline at a time if that's more convenient.
+		 */
+		row_pointer[0] = & ((JSAMPLE*)camera->capture_buffer)[cinfo.next_scanline * row_stride];
+		(void) jpeg_write_scanlines(&cinfo, row_pointer, 1);
+	}
+
+	/* Step 6: Finish compression */
+
+	jpeg_finish_compress(&cinfo);
+	/* After finish_compress, we can close the output file. */
+	fclose(outfile);
+
+	/* Step 7: release JPEG compression object */
+
+	/* This is an important step since it will release a good deal of memory. */
+	jpeg_destroy_compress(&cinfo);
+
+	printf("wrote: %s\n", filename);
+
+	/* And we're done! */
+} /* writeJPEGFile */
+
+/* --- writePPMFile --- */
+int writePPMFile(char *filename, dc1394_cameracapture *camera)
+{
+	FILE	*imagefile;
+
+	imagefile = fopen(filename, "w");
+	if (imagefile == NULL)
+		return 1;
+
+	fprintf(imagefile, "P6\n%u %u\n255\n", camera->frame_width,
+		camera->frame_height);
+	fwrite((const char *)camera->capture_buffer, 1,
+	       camera->frame_height * camera->frame_width * 3, imagefile);
+	fclose(imagefile);
+	printf("wrote: %s\n", filename);
+	return 0;
+} /* writePPMFile */
+
 /* --- saveImage --- */
 int saveImage(dc1394_cameracapture *camera)
 {
-	FILE	*imagefile;
 	char	filename[128];
 	char	str[256];
 	time_t	now;
@@ -175,17 +316,8 @@ int saveImage(dc1394_cameracapture *camera)
 	DrawText(camera,str,xt-2,yt-2,0xFFFF7F);
 
 	sprintf(filename,g_filename,timeStamp());
-	imagefile = fopen(filename, "w");
-
-	if (imagefile == NULL)
-		return 1;
-
-	fprintf(imagefile, "P6\n%u %u\n255\n", camera->frame_width,
-		camera->frame_height);
-	fwrite((const char *)camera->capture_buffer, 1,
-	       camera->frame_height * camera->frame_width * 3, imagefile);
-	fclose(imagefile);
-	printf("wrote: %s\n", filename);
+	//writePPMFile(filename,camera);
+	writeJPEGFile(filename,80,camera);
 	return 0;
 } /* saveImage */
 
