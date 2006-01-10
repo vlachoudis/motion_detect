@@ -1,6 +1,9 @@
 /*
- * $Header: /home/bnv/prg/multimedia/motion_detect/RCS/gtext.c,v 1.1 2006/01/10 14:13:32 bnv Exp $
+ * $Header: /home/bnv/prg/multimedia/motion_detect/RCS/gtext.c,v 1.2 2006/01/10 15:24:32 bnv Exp $
  * $Log: gtext.c,v $
+ * Revision 1.2  2006/01/10 15:24:32  bnv
+ * Corrected: signed vs unsigned char
+ *
  * Revision 1.1  2006/01/10 14:13:32  bnv
  * Initial revision
  *
@@ -123,7 +126,7 @@ int PutLetter(dc1394_cameracapture *camera,int l,int x,int y, int col)
 
 	for (i=0; letter[i][0]; i++)
 		if (letter[i][0] == l) {
-			c = letter[i];
+			c = (unsigned char*)letter[i];
 			c++;
 			goto dis000;
 		}
