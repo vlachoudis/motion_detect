@@ -1,7 +1,10 @@
 
 /*
- * $Id: motion_detect.c,v 1.2 2006/01/10 15:24:32 bnv Exp $
+ * $Id: motion_detect.c,v 1.3 2006/09/04 07:49:35 bnv Exp $
  * $Log: motion_detect.c,v $
+ * Revision 1.3  2006/09/04 07:49:35  bnv
+ * Using the new version of dc1394 library
+ *
  * Revision 1.2  2006/01/10 15:24:32  bnv
  * Added: JPEG exporting
  *
@@ -18,7 +21,7 @@
 
 #include <stdio.h>
 #include <libraw1394/raw1394.h>
-#include <libdc1394/dc1394_control.h>
+#include <dc1394/dc1394_control.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdint.h>
@@ -44,7 +47,7 @@
 #define MAX_RESETS 10
 
 typedef unsigned char	byte;
-int DrawText(dc1394_cameracapture *camera, char *txt, int x, int y, int col);
+int DrawText(dc1394camera_t *camera, char *txt, int x, int y, int col);
 
 double	threshold    = 200.0;
 int	time2sleep   = 5;
@@ -55,12 +58,20 @@ u_int64_t g_guid = 0;
 
 static struct option long_options[] = {
 	{"guid", 1, NULL, 0},
-	{"threshold",1,NULL, 0},
-	{"sleep",1,NULL, 0},
-	{"time",1,NULL, 0},
+	{"threshold", 1, NULL, 0},
+	{"sleep", 1, NULL, 0},
+	{"time", 1, NULL, 0},
 	{"help", 0, NULL, 0},
 	{NULL, 0, 0, 0}
 };
+
+/* --- cleanup_and_exit --- */
+void cleanup_and_exit(dc1394camera_t *camera, int rc)
+{
+	dc1394_capture_stop(camera);
+	dc1394_free_camera(camera);
+	exit(rc);
+} /* cleanup_and_exit */
 
 /* --- get_options --- */
 void get_options(int argc, char *argv[])
@@ -71,7 +82,7 @@ void get_options(int argc, char *argv[])
 		switch (option_index) {
 			/* case values must match long_options */
 			case 0:
-				sscanf(optarg, "%llx", &g_guid);
+				sscanf(optarg, "%lx", &g_guid);
 				break;
 			case 1:
 				sscanf(optarg, "%lg", &threshold);
@@ -103,24 +114,24 @@ void get_options(int argc, char *argv[])
 
 	printf("Options\n");
 	printf("\tGuid\t\t%lu\n",(unsigned long)g_guid);
-	printf("\tThreshold\t%g\n",threshold);
-	printf("\tSleep Time\t%d s\n",time2sleep);
-	printf("\tFilename\t%s\n\n",g_filename);
+	printf("\tThreshold\t%g\n", threshold);
+	printf("\tSleep Time\t%d s\n", time2sleep);
+	printf("\tFilename\t%s\n\n", g_filename);
 } /* get_options */
 
 /* --- compareFrames --- */
-int compareFrames(dc1394_cameracapture *camera, byte *prev_buffer)
+int compareFrames(dc1394camera_t *camera, byte *prev_buffer)
 {
-	int	x,y;
+	int	x, y;
 	double	sum2 = 0.0;
 	double	rms;
 	byte	*curr, *prev;
 
-	curr = (byte*)camera->capture_buffer;
+	curr = (byte*)camera->capture.capture_buffer;
 	prev = (byte*)prev_buffer;
 
-	for (y=0; y<camera->frame_height; y++)
-		for (x=0; x<camera->frame_width; x++) {
+	for (y=0; y<camera->capture.frame_height; y++)
+		for (x=0; x<camera->capture.frame_width; x++) {
 			double	currGray, prevGray;
 			int	red, green, blue;
 			int	diff;
@@ -143,8 +154,8 @@ int compareFrames(dc1394_cameracapture *camera, byte *prev_buffer)
 			sum2 += diff*diff;
 		}
 
-	rms = sum2/(double)(camera->frame_height*camera->frame_width);
-	printf("SUM2=%lg RMS=%lg\n",sum2,rms);
+	rms = sum2/(double)(camera->capture.frame_height*camera->capture.frame_width);
+	printf("SUM2=%lg RMS=%lg\n", sum2, rms);
 
 	return (rms>threshold);
 } /* compareFrames */
@@ -163,7 +174,7 @@ long timeStamp()
 } /* timeStamp */
 
 /* --- writeJPEGFile --- */
-GLOBAL(void) writeJPEGFile(char *filename, int quality, dc1394_cameracapture *camera)
+GLOBAL(void) writeJPEGFile(char *filename, int quality, dc1394camera_t *camera)
 {
 	/* This struct contains the JPEG compression parameters and pointers to
 	 * working space (which is allocated as needed by the JPEG library).
@@ -217,8 +228,8 @@ GLOBAL(void) writeJPEGFile(char *filename, int quality, dc1394_cameracapture *ca
 	 * Four fields of the cinfo struct must be filled in:
 	 */
 	/* image width and height, in pixels */
-	cinfo.image_width = camera->frame_width;
-	cinfo.image_height = camera->frame_height;
+	cinfo.image_width = camera->capture.frame_width;
+	cinfo.image_height = camera->capture.frame_height;
 	cinfo.input_components = 3;		/* # of color components per pixel */
 	cinfo.in_color_space = JCS_RGB;	/* colorspace of input image */
 	/* Now use the library's routine to set default compression parameters.
@@ -246,14 +257,14 @@ GLOBAL(void) writeJPEGFile(char *filename, int quality, dc1394_cameracapture *ca
 	 * To keep things simple, we pass one scanline per call; you can pass
 	 * more if you wish, though.
 	 */
-	row_stride = camera->frame_width * 3;	/* JSAMPLEs per row in image_buffer */
+	row_stride = camera->capture.frame_width * 3;	/* JSAMPLEs per row in image_buffer */
 
 	while (cinfo.next_scanline < cinfo.image_height) {
 		/* jpeg_write_scanlines expects an array of pointers to scanlines.
 		 * Here the array is only one element long, but you could pass
 		 * more than one scanline at a time if that's more convenient.
 		 */
-		row_pointer[0] = & ((JSAMPLE*)camera->capture_buffer)[cinfo.next_scanline * row_stride];
+		row_pointer[0] = & ((JSAMPLE*)camera->capture.capture_buffer)[cinfo.next_scanline * row_stride];
 		(void) jpeg_write_scanlines(&cinfo, row_pointer, 1);
 	}
 
@@ -274,7 +285,7 @@ GLOBAL(void) writeJPEGFile(char *filename, int quality, dc1394_cameracapture *ca
 } /* writeJPEGFile */
 
 /* --- writePPMFile --- */
-int writePPMFile(char *filename, dc1394_cameracapture *camera)
+int writePPMFile(char *filename, dc1394camera_t *camera)
 {
 	FILE	*imagefile;
 
@@ -282,23 +293,23 @@ int writePPMFile(char *filename, dc1394_cameracapture *camera)
 	if (imagefile == NULL)
 		return 1;
 
-	fprintf(imagefile, "P6\n%u %u\n255\n", camera->frame_width,
-		camera->frame_height);
-	fwrite((const char *)camera->capture_buffer, 1,
-	       camera->frame_height * camera->frame_width * 3, imagefile);
+	fprintf(imagefile, "P6\n%u %u\n255\n", camera->capture.frame_width,
+		camera->capture.frame_height);
+	fwrite((const char *)camera->capture.capture_buffer, 1,
+	       camera->capture.frame_height * camera->capture.frame_width * 3, imagefile);
 	fclose(imagefile);
 	printf("wrote: %s\n", filename);
 	return 0;
 } /* writePPMFile */
 
 /* --- saveImage --- */
-int saveImage(dc1394_cameracapture *camera)
+int saveImage(dc1394camera_t *camera)
 {
 	char	filename[128];
 	char	str[256];
 	time_t	now;
 	struct tm *tmdata ;
-	int	xt,yt;
+	int	xt, yt;
 
 	now = time(NULL);
 	tmdata = localtime(&now) ;
@@ -311,208 +322,158 @@ int saveImage(dc1394_cameracapture *camera)
 			tmdata->tm_sec);
 
 	xt = 5;
-	yt = camera->frame_height-24;
-	DrawText(camera,str,xt,yt,0x1F1F1F);
-	DrawText(camera,str,xt-2,yt-2,0xFFFF7F);
+	yt = camera->capture.frame_height-24;
+	DrawText(camera, str, xt, yt, 0x1F1F1F);
+	DrawText(camera, str, xt-2, yt-2, 0xFFFF7F);
 
-	sprintf(filename,g_filename,timeStamp());
-	//writePPMFile(filename,camera);
-	writeJPEGFile(filename,80,camera);
+	sprintf(filename, g_filename, timeStamp());
+	//writePPMFile(filename, camera);
+	writeJPEGFile(filename, 80, camera);
 	return 0;
 } /* saveImage */
 
 /* --- main --- */
 int main(int argc, char *argv[])
 {
-	dc1394_cameracapture camera;
+	dc1394camera_t *camera, **cameras=NULL;
 	byte	*prev_buffer;
-	struct	raw1394_portinfo ports[MAX_PORTS];
-	int	numPorts = 0;
-	int	numCameras = 0;
-	int	i, j;
-	int	found = 0;
+	uint_t	numCameras = 0;
+	int	i, err;
 	long	startTime;
-	raw1394handle_t handle;
-	nodeid_t *camera_nodes = NULL;
+	//dc1394featureset_t features;
 
 	get_options(argc, argv);
 
 	/*-----------------------------------------------------------------------
-	 *  Open ohci and asign handle to it
+	 *  find cameras
 	 *-----------------------------------------------------------------------*/
-	handle = raw1394_new_handle();
-	if (handle == NULL) {
-		fprintf(stderr, "Unable to aquire a raw1394 handle\n\n"
-			"Please check \n"
-			"  - if the kernel modules `ieee1394',`raw1394' and `ohci1394' are loaded \n"
-			"  - if you have read/write access to /dev/raw1394\n\n");
+	err = dc1394_find_cameras(&cameras, &numCameras);
+	if (err!=DC1394_SUCCESS) {
+		fprintf( stderr, "Unable to look for an IIDC camera\n\n"
+			"Please check that\n"
+			"  - the kernel modules `ieee1394',`raw1394' and `ohci1394' are loaded \n"
+			"  - you have read/write access to /dev/raw1394\n\n");
 		exit(1);
 	}
-	/* get the number of ports (cards) */
-	numPorts = raw1394_get_port_info(handle, ports, numPorts);
-	raw1394_destroy_handle(handle);
-	handle = NULL;
-
-	for (j = 0; j < MAX_RESETS && found == 0; j++) {
-		/* look across all ports for cameras */
-		for (i = 0; i < numPorts && found == 0; i++) {
-			if (handle != NULL)
-				dc1394_destroy_handle(handle);
-			handle = dc1394_create_handle(i);
-			if (handle == NULL) {
-				fprintf(stderr,
-					"Unable to aquire a raw1394 handle for port %i\n",
-					i);
-				exit(1);
-			}
-			numCameras = 0;
-			camera_nodes = dc1394_get_camera_nodes(handle,
-							       &numCameras, 0);
-			if (numCameras > 0) {
-				if (g_guid == 0) {
-					dc1394_camerainfo info;
-
-					/* use the first camera found */
-					camera.node = camera_nodes[0];
-					if (dc1394_get_camera_info
-					    (handle, camera_nodes[0],
-					     &info) == DC1394_SUCCESS)
-						dc1394_print_camera_info(&info);
-					found = 1;
-				} else {
-					/* attempt to locate camera by guid */
-					int k;
-
-					for (k = 0;
-					     k < numCameras && found == 0;
-					     k++) {
-						dc1394_camerainfo info;
-
-						if (dc1394_get_camera_info
-						    (handle, camera_nodes[k],
-						     &info) == DC1394_SUCCESS) {
-							if (info.euid_64 ==
-							    g_guid) {
-								dc1394_print_camera_info
-										(&info);
-								camera.node = camera_nodes[k];
-								found = 1;
-							}
-						}
-					}
-				}
-				if (found == 1) {
-					/* camera can not be root--highest order node */
-					if (camera.node ==
-					    raw1394_get_nodecount(handle) - 1) {
-						/* reset and retry if root */
-						raw1394_reset_bus(handle);
-						sleep(2);
-						found = 0;
-					}
-				}
-				dc1394_free_camera_nodes(camera_nodes);
-			}	/* cameras >0 */
-		}		/* next port */
-	}			/* next reset retry */
-
-	if (found == 0 && g_guid != 0) {
-		fprintf(stderr, "Unable to locate camera node by guid\n");
-		exit(1);
-	} else if (numCameras == 0) {
+	/*-----------------------------------------------------------------------
+	 *  get the camera nodes and describe them as we find them
+	 *-----------------------------------------------------------------------*/
+	if (numCameras<1) {
 		fprintf(stderr, "no cameras found :(\n");
-		dc1394_destroy_handle(handle);
 		exit(1);
 	}
-	if (j == MAX_RESETS) {
-		fprintf(stderr, "failed to not make camera root node :(\n");
-		dc1394_destroy_handle(handle);
-		exit(1);
-	}
+	camera=cameras[0];
+	printf("working with the first camera on the bus\n");
+
+	// free the other cameras
+	for (i=1; i<numCameras; i++)
+		dc1394_free_camera(cameras[i]);
+	free(cameras);
 
 	/*-----------------------------------------------------------------------
 	 *  setup capture
 	 *-----------------------------------------------------------------------*/
-	if (dc1394_setup_capture(handle, camera.node, 0,	/* channel */
-				 FORMAT_VGA_NONCOMPRESSED,
-				 MODE_640x480_RGB,
-				 SPEED_400,
-				 FRAMERATE_7_5, &camera) != DC1394_SUCCESS) {
-		fprintf(stderr, "unable to setup camera-\n"
+	err = dc1394_video_set_iso_speed(camera, DC1394_ISO_SPEED_400);
+	DC1394_ERR_RTN(err,"Could not set ISO speed");
+	dc1394_video_set_mode(camera, DC1394_VIDEO_MODE_640x480_RGB8);
+	DC1394_ERR_RTN(err,"Could not set video mode 640x480xRGB8");
+	dc1394_video_set_framerate(camera, DC1394_FRAMERATE_7_5);
+	DC1394_ERR_RTN(err,"Could not set framerate to 7.5fps");
+	if (dc1394_capture_setup(camera)!=DC1394_SUCCESS) {
+		fprintf( stderr,"unable to setup camera-\n"
 			"check line %d of %s to make sure\n"
-			"that the video mode,framerate and format are\n"
-			"supported by your camera\n", __LINE__, __FILE__);
-		dc1394_release_camera(handle, &camera);
-		dc1394_destroy_handle(handle);
-		exit(1);
+			"that the video mode, framerate and format are\n"
+			"supported by your camera\n",
+			__LINE__, __FILE__);
+		cleanup_and_exit(camera, 1);
 	}
+
+	/*-----------------------------------------------------------------------
+	 *  report camera's features
+	 *-----------------------------------------------------------------------*/
+#if 0
+	if (dc1394_get_camera_feature_set(camera, &features) != DC1394_SUCCESS) {
+		fprintf( stderr, "unable to get feature set\n");
+	}
+	else {
+		dc1394_print_feature_set(&features);
+	}
+#endif
 
 	/*-----------------------------------------------------------------------
 	 *  have the camera start sending us data
 	 *-----------------------------------------------------------------------*/
-	if (dc1394_start_iso_transmission(handle, camera.node)
-	    != DC1394_SUCCESS) {
-		fprintf(stderr, "unable to start camera iso transmission\n");
-		dc1394_release_camera(handle, &camera);
-		dc1394_destroy_handle(handle);
-		exit(1);
+	if (dc1394_video_set_transmission(camera, DC1394_ON) !=DC1394_SUCCESS) {
+		fprintf( stderr, "unable to start camera iso transmission\n");
+		cleanup_and_exit(camera, 2);
 	}
 
-	/*-------------------------------------------------------------------
-	 *  capture first frame
-	 *-------------------------------------------------------------------*/
-	if (dc1394_single_capture(handle, &camera) != DC1394_SUCCESS) {
-		fprintf(stderr, "unable to capture a frame\n");
-		dc1394_release_camera(handle, &camera);
-		dc1394_destroy_handle(handle);
-		exit(1);
+	/*-----------------------------------------------------------------------
+	*  Sleep until the camera effectively started to transmit
+	*-----------------------------------------------------------------------*/
+	dc1394switch_t status = DC1394_OFF;
+
+	i = 0;
+	while( status == DC1394_OFF && i++ < 5 ) {
+		usleep(50000);
+		if (dc1394_video_get_transmission(camera, &status) != DC1394_SUCCESS) {
+			fprintf(stderr, "unable to get transmision status\n");
+			cleanup_and_exit(camera, 3);
+		}
 	}
 
-	if (saveImage(&camera)) {
+	if( i == 5 ) {
+		fprintf(stderr,"Camera doesn't seem to want to turn on!\n");
+		cleanup_and_exit(camera, 4);
+	}
+
+	/*-----------------------------------------------------------------------
+	*  capture one frame
+	*-----------------------------------------------------------------------*/
+	if (dc1394_capture(&camera,1) != DC1394_SUCCESS) {
+		fprintf( stderr, "unable to capture a frame\n");
+		cleanup_and_exit(camera, 5);
+	}
+
+	if (saveImage(camera)) {
 		perror("Can't create output file");
-		dc1394_release_camera(handle, &camera);
-		dc1394_destroy_handle(handle);
-		exit(1);
+		cleanup_and_exit(camera, 6);
 	}
 
-	prev_buffer = (byte *)malloc(camera.frame_width * camera.frame_height * 3);
+	prev_buffer = (byte *)malloc(camera->capture.frame_width
+				* camera->capture.frame_height * 3);
 
 	startTime = timeStamp();
 	while (timeStamp()-startTime<=totalTime) {
 		/*----------------------------------------------------------
 		 *  copy image
 		 *----------------------------------------------------------*/
-		memcpy(prev_buffer, camera.capture_buffer,
-		       camera.frame_width * camera.frame_height * 3);
+		memcpy(prev_buffer, camera->capture.capture_buffer,
+		       camera->capture.frame_width * camera->capture.frame_height * 3);
 
 		sleep(time2sleep);
 
 		/*----------------------------------------------------------
 		 *  capture next image
 		 *----------------------------------------------------------*/
-		if (dc1394_single_capture(handle, &camera) != DC1394_SUCCESS) {
-			fprintf(stderr, "unable to capture a frame\n");
-			dc1394_release_camera(handle, &camera);
-			dc1394_destroy_handle(handle);
-			exit(1);
+		if (dc1394_capture(&camera,1) != DC1394_SUCCESS) {
+			fprintf( stderr, "unable to capture a frame\n");
+			cleanup_and_exit(camera, 7);
 		}
 
 		/*---------------------------------------------------------
 		 *  compare and save
 		 *---------------------------------------------------------*/
-		if (compareFrames(&camera, prev_buffer))
-			if (saveImage(&camera)) {
+		if (compareFrames(camera, prev_buffer))
+			if (saveImage(camera)) {
 				perror("Can't create output file");
-				dc1394_release_camera(handle, &camera);
-				dc1394_destroy_handle(handle);
-				exit(1);
+				cleanup_and_exit(camera, 8);
 			}
 	}
 
 	/*-----------------------------------------------------------------------
 	 *  Close camera
 	 *-----------------------------------------------------------------------*/
-	dc1394_release_camera(handle, &camera);
-	dc1394_destroy_handle(handle);
+	cleanup_and_exit(camera, 0);
 	return 0;
 } /* main */
