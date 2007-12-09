@@ -1,7 +1,10 @@
 
 /*
- * $Id: motion_detect.c,v 1.3 2006/09/04 07:49:35 bnv Exp $
+ * $Id: motion_detect.c,v 1.4 2007/12/09 13:25:42 bnv Exp $
  * $Log: motion_detect.c,v $
+ * Revision 1.4  2007/12/09 13:25:42  bnv
+ * Changed to use V4L with YUV420P (only) for the moment
+ *
  * Revision 1.3  2006/09/04 07:49:35  bnv
  * Using the new version of dc1394 library
  *
@@ -16,22 +19,24 @@
  * Date:	28-Jan-2005
  */
 
+#include <os.h>
 #include <stdio.h>
-#include <stdlib.h>
-
-#include <stdio.h>
-#include <libraw1394/raw1394.h>
-#include <dc1394/dc1394_control.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdint.h>
 #include <string.h>
-#define _GNU_SOURCE
 #include <getopt.h>
 #include <time.h>
+#include <fcntl.h>
 #include <sys/time.h>
-#include <sys/unistd.h>
-#include <stdio.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/ioctl.h>
+
+#include <linux/videodev.h>
+
+#define VIDEODEV "/dev/video0"
+
 /*
  * Include file for users of JPEG library.
  * You will need to have included system headers that define at least
@@ -46,15 +51,17 @@
 #define MAX_PORTS 4
 #define MAX_RESETS 10
 
-typedef unsigned char	byte;
-int DrawText(dc1394camera_t *camera, char *txt, int x, int y, int col);
+int DrawText(byte *image, int width, int height, char *txt, int x, int y, int col);
+
+struct video_capability	cap;
+struct video_window	win;
+struct video_picture	vpic;
 
 double	threshold    = 200.0;
 int	time2sleep   = 5;
 int	totalTime    = 86400;
 
 char *g_filename = "image-%08d.jpg";
-u_int64_t g_guid = 0;
 
 static struct option long_options[] = {
 	{"guid", 1, NULL, 0},
@@ -65,14 +72,6 @@ static struct option long_options[] = {
 	{NULL, 0, 0, 0}
 };
 
-/* --- cleanup_and_exit --- */
-void cleanup_and_exit(dc1394camera_t *camera, int rc)
-{
-	dc1394_capture_stop(camera);
-	dc1394_free_camera(camera);
-	exit(rc);
-} /* cleanup_and_exit */
-
 /* --- get_options --- */
 void get_options(int argc, char *argv[])
 {
@@ -81,9 +80,9 @@ void get_options(int argc, char *argv[])
 	while (getopt_long(argc, argv, "", long_options, &option_index) >= 0) {
 		switch (option_index) {
 			/* case values must match long_options */
-			case 0:
-				sscanf(optarg, "%lx", &g_guid);
-				break;
+//			case 0:
+//				sscanf(optarg, "%lx", &g_guid);
+//				break;
 			case 1:
 				sscanf(optarg, "%lg", &threshold);
 				break;
@@ -113,48 +112,42 @@ void get_options(int argc, char *argv[])
 		g_filename = argv[optind];
 
 	printf("Options\n");
-	printf("\tGuid\t\t%lu\n",(unsigned long)g_guid);
 	printf("\tThreshold\t%g\n", threshold);
 	printf("\tSleep Time\t%d s\n", time2sleep);
 	printf("\tFilename\t%s\n\n", g_filename);
 } /* get_options */
 
 /* --- compareFrames --- */
-int compareFrames(dc1394camera_t *camera, byte *prev_buffer)
+int compareFrames(byte *frame, byte *prev_frame)
 {
-	int	x, y;
+	int	i;
 	double	sum2 = 0.0;
 	double	rms;
-	byte	*curr, *prev;
 
-	curr = (byte*)camera->capture.capture_buffer;
-	prev = (byte*)prev_buffer;
+	for (i=0; i<win.width*win.height; i++) {
+		double	currGray, prevGray;
+		int	red, green, blue;
+		int	diff;
 
-	for (y=0; y<camera->capture.frame_height; y++)
-		for (x=0; x<camera->capture.frame_width; x++) {
-			double	currGray, prevGray;
-			int	red, green, blue;
-			int	diff;
+		red   = *frame++;
+		green = *frame++;
+		blue  = *frame++;
+		currGray = 0.3  * (double)red +
+			   0.59 * (double)green +
+			   0.11 * (double)blue;
 
-			red   = *curr++;
-			green = *curr++;
-			blue  = *curr++;
-			currGray = 0.3  * (double)red +
-				   0.59 * (double)green +
-				   0.11 * (double)blue;
+		red   = *prev_frame++;
+		green = *prev_frame++;
+		blue  = *prev_frame++;
+		prevGray = 0.3  * (double)red +
+			   0.59 * (double)green +
+			   0.11 * (double)blue;
 
-			red   = *prev++;
-			green = *prev++;
-			blue  = *prev++;
-			prevGray = 0.3  * (double)red +
-				   0.59 * (double)green +
-				   0.11 * (double)blue;
+		diff = currGray-prevGray;
+		sum2 += diff*diff;
+	}
 
-			diff = currGray-prevGray;
-			sum2 += diff*diff;
-		}
-
-	rms = sum2/(double)(camera->capture.frame_height*camera->capture.frame_width);
+	rms = sum2/(double)(win.height*win.width);
 	printf("SUM2=%lg RMS=%lg\n", sum2, rms);
 
 	return (rms>threshold);
@@ -174,7 +167,7 @@ long timeStamp()
 } /* timeStamp */
 
 /* --- writeJPEGFile --- */
-GLOBAL(void) writeJPEGFile(char *filename, int quality, dc1394camera_t *camera)
+GLOBAL(void) writeJPEGFile(char *filename, int quality, byte *frame)
 {
 	/* This struct contains the JPEG compression parameters and pointers to
 	 * working space (which is allocated as needed by the JPEG library).
@@ -228,8 +221,8 @@ GLOBAL(void) writeJPEGFile(char *filename, int quality, dc1394camera_t *camera)
 	 * Four fields of the cinfo struct must be filled in:
 	 */
 	/* image width and height, in pixels */
-	cinfo.image_width = camera->capture.frame_width;
-	cinfo.image_height = camera->capture.frame_height;
+	cinfo.image_width      = win.width;
+	cinfo.image_height     = win.height;
 	cinfo.input_components = 3;		/* # of color components per pixel */
 	cinfo.in_color_space = JCS_RGB;	/* colorspace of input image */
 	/* Now use the library's routine to set default compression parameters.
@@ -257,14 +250,14 @@ GLOBAL(void) writeJPEGFile(char *filename, int quality, dc1394camera_t *camera)
 	 * To keep things simple, we pass one scanline per call; you can pass
 	 * more if you wish, though.
 	 */
-	row_stride = camera->capture.frame_width * 3;	/* JSAMPLEs per row in image_buffer */
+	row_stride = win.width * 3;	/* JSAMPLEs per row in image_buffer */
 
 	while (cinfo.next_scanline < cinfo.image_height) {
 		/* jpeg_write_scanlines expects an array of pointers to scanlines.
 		 * Here the array is only one element long, but you could pass
 		 * more than one scanline at a time if that's more convenient.
 		 */
-		row_pointer[0] = & ((JSAMPLE*)camera->capture.capture_buffer)[cinfo.next_scanline * row_stride];
+		row_pointer[0] = & (frame)[cinfo.next_scanline * row_stride];
 		(void) jpeg_write_scanlines(&cinfo, row_pointer, 1);
 	}
 
@@ -284,26 +277,8 @@ GLOBAL(void) writeJPEGFile(char *filename, int quality, dc1394camera_t *camera)
 	/* And we're done! */
 } /* writeJPEGFile */
 
-/* --- writePPMFile --- */
-int writePPMFile(char *filename, dc1394camera_t *camera)
-{
-	FILE	*imagefile;
-
-	imagefile = fopen(filename, "w");
-	if (imagefile == NULL)
-		return 1;
-
-	fprintf(imagefile, "P6\n%u %u\n255\n", camera->capture.frame_width,
-		camera->capture.frame_height);
-	fwrite((const char *)camera->capture.capture_buffer, 1,
-	       camera->capture.frame_height * camera->capture.frame_width * 3, imagefile);
-	fclose(imagefile);
-	printf("wrote: %s\n", filename);
-	return 0;
-} /* writePPMFile */
-
 /* --- saveImage --- */
-int saveImage(dc1394camera_t *camera)
+int saveImage(byte *frame)
 {
 	char	filename[128];
 	char	str[256];
@@ -322,158 +297,305 @@ int saveImage(dc1394camera_t *camera)
 			tmdata->tm_sec);
 
 	xt = 5;
-	yt = camera->capture.frame_height-24;
-	DrawText(camera, str, xt, yt, 0x1F1F1F);
-	DrawText(camera, str, xt-2, yt-2, 0xFFFF7F);
+	yt = win.height-24;
+	DrawText(frame, win.width, win.height, str, xt, yt, 0x1F1F1F);
+	DrawText(frame, win.width, win.height, str, xt-2, yt-2, 0xFFFF7F);
 
 	sprintf(filename, g_filename, timeStamp());
-	//writePPMFile(filename, camera);
-	writeJPEGFile(filename, 80, camera);
+	writeJPEGFile(filename, 80, frame);
 	return 0;
 } /* saveImage */
+
+#define READ_VIDEO_PIXEL(buf, format, depth, r, g, b)                   \
+{                                                                       \
+	switch (format)                                                 \
+	{                                                               \
+		case VIDEO_PALETTE_GREY:                                \
+			switch (depth)                                  \
+			{                                               \
+				case 4:                                 \
+				case 6:                                 \
+				case 8:                                 \
+					(r) = (g) = (b) = (*buf++ << 8);\
+					break;                          \
+									\
+				case 16:                                \
+					(r) = (g) = (b) =               \
+						*((unsigned short *) buf);      \
+					buf += 2;                       \
+					break;                          \
+			}                                               \
+			break;                                          \
+									\
+									\
+		case VIDEO_PALETTE_RGB565:                              \
+		{                                                       \
+			unsigned short tmp = *(unsigned short *)buf;    \
+			(r) = tmp&0xF800;                               \
+			(g) = (tmp<<5)&0xFC00;                          \
+			(b) = (tmp<<11)&0xF800;                         \
+			buf += 2;                                       \
+		}                                                       \
+		break;                                                  \
+									\
+		case VIDEO_PALETTE_RGB555:                              \
+			(r) = (buf[0]&0xF8)<<8;                         \
+			(g) = ((buf[0] << 5 | buf[1] >> 3)&0xF8)<<8;    \
+			(b) = ((buf[1] << 2 ) & 0xF8)<<8;               \
+			buf += 2;                                       \
+			break;                                          \
+									\
+		case VIDEO_PALETTE_RGB24:                               \
+			(r) = buf[0] << 8; (g) = buf[1] << 8;           \
+			(b) = buf[2] << 8;                              \
+			buf += 3;                                       \
+			break;                                          \
+									\
+		default:                                                \
+			fprintf(stderr,                                 \
+				"Format %d not yet supported\n",        \
+				format);                                \
+	}                                                               \
+}
+/* --- yuv2rgb --- */
+static void yuv2rgb(int y, int u, int v, int *r, int *g, int *b)
+{
+	*r = y + (1.370705 * (v-128));
+	*g = y - (0.698001 * (v-128)) - (0.337633 * (u-128));
+	*b = y + (1.732446 * (u-128));
+
+	/* Even with proper conversion, some values still need clipping. */
+	if (*r > 255) *r = 255;
+	if (*g > 255) *g = 255;
+	if (*b > 255) *b = 255;
+	if (*r < 0) *r = 0;
+	if (*g < 0) *g = 0;
+	if (*b < 0) *b = 0;
+
+	/* Values only go from 0-220..  Why? */
+	*r = (*r * 220) / 256;
+	*g = (*g * 220) / 256;
+	*b = (*b * 220) / 256;
+} /* yuv2rgb */
+
+/* --- is_yuv --- */
+static int is_yuv(uint16_t palette)
+{
+	return ((palette == VIDEO_PALETTE_YUV422)  ||
+		(palette == VIDEO_PALETTE_YUYV)    ||
+		(palette == VIDEO_PALETTE_UYVY)    ||
+		(palette == VIDEO_PALETTE_YUV420)  ||
+		(palette == VIDEO_PALETTE_YUV411)  ||
+		(palette == VIDEO_PALETTE_YUV422P) ||
+		(palette == VIDEO_PALETTE_YUV411P) ||
+		(palette == VIDEO_PALETTE_YUV420P) ||
+		(palette == VIDEO_PALETTE_YUV410P));
+} /* is_yuv */
+
+/* --- capture --- */
+int capture(int fd, byte *buffer, byte *frame)
+{
+	int	i;
+	byte	*src, *dst;
+	int	y, u, v, r, g, b;
+	unsigned src_depth = vpic.depth;
+
+	// adjust brightness when told so and using some RGB palette
+//	i = 0;
+	//do {
+	if (read(fd, buffer, (win.width * win.height * src_depth)/8)<0)
+		return TRUE;
+
+	src = buffer;
+	dst = frame;
+	for (i=0; i<win.width*win.height; i++) {
+		/*
+		if (!is_yuv(vpic.palette)) {
+			READ_VIDEO_PIXEL(src, vpic.palette, src_depth, r, g, b);
+			*src++ = r;
+			*src++ = g;
+			*src++ = b;
+		}
+		else if (vpic.palette == VIDEO_PALETTE_UYVY) {
+			if(i==0) v = src[3];
+			if((i%2) == 0) {
+				u = src[0];
+				y = src[1];
+				src += 2;		// v from next 16bit word
+			} else {
+				v = src[0];
+				y = src[1];
+				src += 2;
+			}
+		}
+		else if ((vpic.palette == VIDEO_PALETTE_YUYV) ||
+			  (vpic.palette == VIDEO_PALETTE_YUV422)) {
+			if(i==0)
+				v = src[4];
+			if((i%2) == 0) {
+				y = src[0];
+				u = src[1];
+				src += 2;		// v from next 16bit word
+			} else {
+				y = src[0];
+				v = src[1];
+				src += 2;
+			}
+		}
+		else if (vpic.palette == VIDEO_PALETTE_YUV422P) {
+			y = buffer[i];
+			if (i == 0)
+				src = buffer + (win.width*win.height);
+			u = src[(i/2)%(win.width/2)];
+			v = src[(win.width*win.height)/2 + (i/2)%(win.width/2)];
+			if (i && (i%(win.width*2) == 0))
+				src += win.width;
+		}
+		else if(vpic.palette == VIDEO_PALETTE_YUV411P) {
+			y = buffer[i];
+			if (i == 0)
+				src = buffer + (win.width*win.height);
+			u = src[(i/4)%(win.width/4)];
+			v = src[(win.width*win.height)/4 + (i/4)%(win.width/4)];
+			if (i && (i%(win.width) == 0))
+				src += win.width/4;
+		}
+		else
+		*/
+		if((vpic.palette == VIDEO_PALETTE_YUV420P) ||
+			  (vpic.palette == VIDEO_PALETTE_YUV420)) {
+			if (i == 0)
+				src = buffer + (win.width*win.height);
+			y = buffer[i];
+			u = src[(i/2)%(win.width/2)];
+			v = src[(win.width*win.height)/4 + (i/2)%(win.width/2)];
+			if (i && (i%(win.width*4)) == 0)
+				src += win.width;
+		}
+		/*
+		else if(vpic.palette == VIDEO_PALETTE_YUV410P) {
+			if (i == 0)
+				src = buffer + (win.width*win.height);
+			y = buffer[i];
+			u = src[(i/4)%(win.width/4)];
+			v = src[(win.width*win.height)/16 + (i/4)%(win.width/4)];
+			if (i && (i%(win.width*4)) == 0)
+				src += win.width/4;
+		}
+		*/
+		yuv2rgb(y, u, v, &r, &g, &b);
+		*dst++ = r;
+		*dst++ = g;
+		*dst++ = b;
+	}
+	return 0;
+} /* capture */
 
 /* --- main --- */
 int main(int argc, char *argv[])
 {
-	dc1394camera_t *camera, **cameras=NULL;
-	byte	*prev_buffer;
-	uint_t	numCameras = 0;
-	int	i, err;
 	long	startTime;
-	//dc1394featureset_t features;
+	int	fd;
+	byte	*buffer, *frame, *prev_frame;
 
 	get_options(argc, argv);
 
-	/*-----------------------------------------------------------------------
-	 *  find cameras
-	 *-----------------------------------------------------------------------*/
-	err = dc1394_find_cameras(&cameras, &numCameras);
-	if (err!=DC1394_SUCCESS) {
-		fprintf( stderr, "Unable to look for an IIDC camera\n\n"
-			"Please check that\n"
-			"  - the kernel modules `ieee1394',`raw1394' and `ohci1394' are loaded \n"
-			"  - you have read/write access to /dev/raw1394\n\n");
+	fd = open(VIDEODEV, O_RDONLY);
+	if (fd < 0) {
+		perror(VIDEODEV);
 		exit(1);
 	}
-	/*-----------------------------------------------------------------------
-	 *  get the camera nodes and describe them as we find them
-	 *-----------------------------------------------------------------------*/
-	if (numCameras<1) {
-		fprintf(stderr, "no cameras found :(\n");
+
+	if (ioctl(fd, VIDIOCGCAP, &cap) < 0) {
+		perror("VIDIOGCAP");
+		fprintf(stderr, "(" VIDEODEV " not a video4linux device?)\n");
+		close(fd);
 		exit(1);
 	}
-	camera=cameras[0];
-	printf("working with the first camera on the bus\n");
 
-	// free the other cameras
-	for (i=1; i<numCameras; i++)
-		dc1394_free_camera(cameras[i]);
-	free(cameras);
-
-	/*-----------------------------------------------------------------------
-	 *  setup capture
-	 *-----------------------------------------------------------------------*/
-	err = dc1394_video_set_iso_speed(camera, DC1394_ISO_SPEED_400);
-	DC1394_ERR_RTN(err,"Could not set ISO speed");
-	dc1394_video_set_mode(camera, DC1394_VIDEO_MODE_640x480_RGB8);
-	DC1394_ERR_RTN(err,"Could not set video mode 640x480xRGB8");
-	dc1394_video_set_framerate(camera, DC1394_FRAMERATE_7_5);
-	DC1394_ERR_RTN(err,"Could not set framerate to 7.5fps");
-	if (dc1394_capture_setup(camera)!=DC1394_SUCCESS) {
-		fprintf( stderr,"unable to setup camera-\n"
-			"check line %d of %s to make sure\n"
-			"that the video mode, framerate and format are\n"
-			"supported by your camera\n",
-			__LINE__, __FILE__);
-		cleanup_and_exit(camera, 1);
+	if (ioctl(fd, VIDIOCGWIN, &win) < 0) {
+		perror("VIDIOCGWIN");
+		close(fd);
+		exit(1);
 	}
 
-	/*-----------------------------------------------------------------------
-	 *  report camera's features
-	 *-----------------------------------------------------------------------*/
-#if 0
-	if (dc1394_get_camera_feature_set(camera, &features) != DC1394_SUCCESS) {
-		fprintf( stderr, "unable to get feature set\n");
-	}
-	else {
-		dc1394_print_feature_set(&features);
-	}
-#endif
-
-	/*-----------------------------------------------------------------------
-	 *  have the camera start sending us data
-	 *-----------------------------------------------------------------------*/
-	if (dc1394_video_set_transmission(camera, DC1394_ON) !=DC1394_SUCCESS) {
-		fprintf( stderr, "unable to start camera iso transmission\n");
-		cleanup_and_exit(camera, 2);
+	if (ioctl(fd, VIDIOCGPICT, &vpic) < 0) {
+		perror("VIDIOCGPICT");
+		close(fd);
+		exit(1);
 	}
 
-	/*-----------------------------------------------------------------------
-	*  Sleep until the camera effectively started to transmit
-	*-----------------------------------------------------------------------*/
-	dc1394switch_t status = DC1394_OFF;
 
-	i = 0;
-	while( status == DC1394_OFF && i++ < 5 ) {
-		usleep(50000);
-		if (dc1394_video_get_transmission(camera, &status) != DC1394_SUCCESS) {
-			fprintf(stderr, "unable to get transmision status\n");
-			cleanup_and_exit(camera, 3);
-		}
+	// Check for video capture
+	if (!(cap.type & VID_TYPE_CAPTURE)) {
+		fprintf(stderr, "error: video4linux device %s cannot capture to memory\n",
+			VIDEODEV);
+		exit(1);
 	}
 
-	if( i == 5 ) {
-		fprintf(stderr,"Camera doesn't seem to want to turn on!\n");
-		cleanup_and_exit(camera, 4);
+	// Use maximum resolution
+	win.width  = cap.maxwidth;
+	win.height = cap.maxheight;
+	if (ioctl(fd, VIDIOCSWIN, &win) < 0) {
+		perror("VIDIOCSWIN");
+		close(fd);
+		exit(1);
+	}
+
+	buffer     = malloc(win.width * win.height * vpic.depth/8);
+	frame      = malloc(win.width * win.height * 3);	// RGB
+	prev_frame = malloc(win.width * win.height * 3);	// RGB
+	if (!buffer || !frame || !prev_frame) {
+		fprintf(stderr, "Out of memory.\n");
+		exit(1);
 	}
 
 	/*-----------------------------------------------------------------------
 	*  capture one frame
 	*-----------------------------------------------------------------------*/
-	if (dc1394_capture(&camera,1) != DC1394_SUCCESS) {
+	if (capture(fd, buffer, frame)) {
 		fprintf( stderr, "unable to capture a frame\n");
-		cleanup_and_exit(camera, 5);
+		close(fd);
+		exit(2);
 	}
 
-	if (saveImage(camera)) {
+	if (saveImage(frame)) {
 		perror("Can't create output file");
-		cleanup_and_exit(camera, 6);
+		close(fd);
+		exit(2);
 	}
-
-	prev_buffer = (byte *)malloc(camera->capture.frame_width
-				* camera->capture.frame_height * 3);
 
 	startTime = timeStamp();
 	while (timeStamp()-startTime<=totalTime) {
 		/*----------------------------------------------------------
 		 *  copy image
 		 *----------------------------------------------------------*/
-		memcpy(prev_buffer, camera->capture.capture_buffer,
-		       camera->capture.frame_width * camera->capture.frame_height * 3);
-
+		memcpy(prev_frame, frame, win.width * win.height * 3);
 		sleep(time2sleep);
 
 		/*----------------------------------------------------------
 		 *  capture next image
 		 *----------------------------------------------------------*/
-		if (dc1394_capture(&camera,1) != DC1394_SUCCESS) {
+		if (capture(fd, buffer, frame)) {
 			fprintf( stderr, "unable to capture a frame\n");
-			cleanup_and_exit(camera, 7);
+			close(fd);
+			exit(2);
 		}
 
 		/*---------------------------------------------------------
 		 *  compare and save
 		 *---------------------------------------------------------*/
-		if (compareFrames(camera, prev_buffer))
-			if (saveImage(camera)) {
+		if (compareFrames(frame, prev_frame))
+			if (saveImage(frame)) {
 				perror("Can't create output file");
-				cleanup_and_exit(camera, 8);
+				close(fd);
+				exit(2);
 			}
 	}
 
 	/*-----------------------------------------------------------------------
 	 *  Close camera
 	 *-----------------------------------------------------------------------*/
-	cleanup_and_exit(camera, 0);
-	return 0;
+	 close(fd);
+	 return 0;
 } /* main */
