@@ -1,6 +1,9 @@
 /*
- * $Header: /home/bnv/prg/multimedia/motion_detect/RCS/gtext.c,v 1.2 2006/01/10 15:24:32 bnv Exp $
+ * $Header: /home/bnv/prg/multimedia/motion_detect/RCS/gtext.c,v 1.3 2007/12/09 13:26:02 bnv Exp $
  * $Log: gtext.c,v $
+ * Revision 1.3  2007/12/09 13:26:02  bnv
+ * Changed to use V4L
+ *
  * Revision 1.2  2006/01/10 15:24:32  bnv
  * Corrected: signed vs unsigned char
  *
@@ -12,10 +15,9 @@
  *
  */
 
+#include <os.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <libraw1394/raw1394.h>
-#include <libdc1394/dc1394_control.h>
 
 static char *letter[] = {
 	"\041\007\007\005\000\007\005\000\007\005\000\007\005\000\006\005\000\007\003\000\007\003\000\007\003\000\001\000\001\000\007\003\000\006\004\000\006\003\000\377",
@@ -116,11 +118,11 @@ static char *letter[] = {
 
 /* --- putLetter --- */
 /* returns maximum width */
-int PutLetter(dc1394_cameracapture *camera,int l,int x,int y, int col)
+int PutLetter(byte *image, int width, int height, int l, int x, int y, int col)
 {
-	int i,xp,count,width=0,w=0,toggle=0;
-	unsigned char *c;
-	unsigned char *pos;
+	int i,xp,count,textwidth=0,w=0,toggle=0;
+	byte *c;
+	byte *pos;
 
 	if (l==' ') return 10;
 
@@ -137,39 +139,39 @@ dis000:
 	xp = x;
 	for (c++; *c!=0xFF; c++) {
 		count = *c;
+		if (y>=height) break;
 		if (count) {
 			if (!toggle)
 				xp += count;
 			else
 				for (i=0; i<count; i++) {
-					pos = (unsigned char*)camera->capture_buffer +
-						((y*camera->frame_width + xp)*3);
+					pos = image + ((y*width + xp)*3);
 					*pos++ = (col>>16)&0xFF;
 					*pos++ = (col>>8)&0xFF;
 					*pos++ = col&0xFF;
 					xp++;
 				}
 			w += count;
-			if (w>width) width = w;
+			if (w>textwidth) textwidth = w;
 			toggle = !toggle;
 		} else {
 			y++;
-			xp = x;
+			xp     = x;
 			toggle = 0;
-			w = 0;
+			w      = 0;
 		}
 	}
-	return width-1;
+	return textwidth-1;
 } /* PutLetter */
 
 /* --- DrawText --- */
 int
-DrawText(dc1394_cameracapture *camera, char *txt, int x, int y, int col)
+DrawText(byte *image, int width, int height, char *txt, int x, int y, int col)
 {
 	int w;
 
 	for (;*txt; txt++) {
-		w = PutLetter(camera,*txt,x,y,col);
+		w = PutLetter(image, width, height, *txt, x, y, col);
 		x += w;
 	}
 	return x;
