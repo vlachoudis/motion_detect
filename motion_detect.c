@@ -1,7 +1,10 @@
 
 /*
- * $Id: motion_detect.c,v 1.4 2007/12/09 13:25:42 bnv Exp $
+ * $Id: motion_detect.c,v 1.5 2008/06/30 13:57:16 bnv Exp $
  * $Log: motion_detect.c,v $
+ * Revision 1.5  2008/06/30 13:57:16  bnv
+ * Added option as camera width and height
+ *
  * Revision 1.4  2007/12/09 13:25:42  bnv
  * Changed to use V4L with YUV420P (only) for the moment
  *
@@ -35,7 +38,7 @@
 
 #include <linux/videodev.h>
 
-#define VIDEODEV "/dev/video0"
+#define VIDEODEV "/dev/video"
 
 /*
  * Include file for users of JPEG library.
@@ -60,15 +63,19 @@ struct video_picture	vpic;
 double	threshold    = 200.0;
 int	time2sleep   = 5;
 int	totalTime    = 86400;
+int	cameraWidth  = -1;
+int	cameraHeight = -1;
 
 char *g_filename = "image-%08d.jpg";
 
 static struct option long_options[] = {
-	{"guid", 1, NULL, 0},
+	{"dev", 1, NULL, 0},
 	{"threshold", 1, NULL, 0},
 	{"sleep", 1, NULL, 0},
 	{"time", 1, NULL, 0},
 	{"help", 0, NULL, 0},
+	{"width", 1, NULL, 0},
+	{"height", 1, NULL, 0},
 	{NULL, 0, 0, 0}
 };
 
@@ -80,9 +87,6 @@ void get_options(int argc, char *argv[])
 	while (getopt_long(argc, argv, "", long_options, &option_index) >= 0) {
 		switch (option_index) {
 			/* case values must match long_options */
-//			case 0:
-//				sscanf(optarg, "%lx", &g_guid);
-//				break;
 			case 1:
 				sscanf(optarg, "%lg", &threshold);
 				break;
@@ -92,16 +96,22 @@ void get_options(int argc, char *argv[])
 			case 3:
 				sscanf(optarg, "%d", &totalTime);
 				break;
+			case 4:
+				sscanf(optarg, "%d", &cameraWidth);
+				break;
+			case 5:
+				sscanf(optarg, "%d", &cameraHeight);
+				break;
 			default:
 				printf("\n"
 				       "%s - grab a color sequence using format0, rgb mode\n\n"
 				       "Usage:\n"
-				       "    %s [--guid=/dev/video1394/x] [filename.ppm]\n\n"
+				       "    %s [--dev=/dev/video0]\n\n"
 				       "    --threshold - specifies RMS threshold to use (default: 200)\n"
 				       "    --sleep     - specifies seconds to sleep (default: 5)\n"
 				       "    --time      - specifies seconds to run (default: 86400)\n"
-				       "    --guid      - specifies camera to use (optional)\n"
-				       "                  default = first identified on buses\n"
+				       "    --width #   - camera width to use\n"
+				       "    --height #  - camera height to use\n"
 				       "    --help      - prints this message\n"
 				       "    filename is optional; the default is image%%08d.ppm\n\n",
 				       argv[0], argv[0]);
@@ -288,7 +298,7 @@ int saveImage(byte *frame)
 
 	now = time(NULL);
 	tmdata = localtime(&now) ;
-	sprintf(str,"Vasilis Office %d/%d/%d %d:%02d:%02d",
+	sprintf(str,"%d/%d/%d %d:%02d:%02d",
 			tmdata->tm_mday,
 			tmdata->tm_mon+1,
 			tmdata->tm_year+1900,
@@ -534,8 +544,16 @@ int main(int argc, char *argv[])
 	}
 
 	// Use maximum resolution
-	win.width  = cap.maxwidth;
-	win.height = cap.maxheight;
+	if (cameraWidth < 0)
+		win.width  = cap.maxwidth;
+	else
+		win.width  = cameraWidth;
+
+	if (cameraHeight < 0)
+		win.height = cap.maxheight;
+	else
+		win.height = cameraHeight;
+
 	if (ioctl(fd, VIDIOCSWIN, &win) < 0) {
 		perror("VIDIOCSWIN");
 		close(fd);
