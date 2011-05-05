@@ -1,7 +1,10 @@
 
 /*
- * $Id: motion_detect.c,v 2.0 2011/05/05 08:56:23 bnv Exp $
+ * $Id: motion_detect.c,v 2.1 2011/05/05 09:08:47 bnv Exp $
  * $Log: motion_detect.c,v $
+ * Revision 2.1  2011/05/05 09:08:47  bnv
+ * Minor change
+ *
  * Revision 2.0  2011/05/05 08:56:23  bnv
  * First version working with V4L2
  *
@@ -74,6 +77,7 @@ int	cameraWidth        = -1;
 int	cameraHeight       = -1;
 int	cameraBytesperline = -1;
 int	stop               =  0;
+int	verbose            =  0;
 
 char *g_filename = "image-%08d.jpg";
 
@@ -84,6 +88,7 @@ static struct option long_options[] = {
 	{"time",      1, NULL, 0} ,
 	{"width",     1, NULL, 0} ,
 	{"height",    1, NULL, 0} ,
+	{"verbose",   0, NULL, 0} ,
 	{"help",      0, NULL, 0} ,
 	{NULL,        0, 0,    0}
 };
@@ -124,7 +129,8 @@ int compareFrames(byte *frame, byte *prev_frame)
 	}
 
 	rms = sum2/(double)(cameraHeight*cameraWidth);
-	printf("SUM2=%lg RMS=%lg\n", sum2, rms);
+	if (verbose)
+		printf("SUM2=%lg RMS=%lg\n", sum2, rms);
 
 	return (rms>threshold);
 } /* compareFrames */
@@ -342,7 +348,6 @@ static void yuv2rgb(int y, int u, int v, int *r, int *g, int *b)
 
 	/* Even with proper conversion, some values still need clipping. */
 	if (*r > 255) *r = 255;
-	int	i;
 	if (*g > 255) *g = 255;
 	if (*b > 255) *b = 255;
 	if (*r < 0) *r = 0;
@@ -495,6 +500,9 @@ void get_options(int argc, char *argv[])
 			case 5:
 				sscanf(optarg, "%d", &cameraHeight);
 				break;
+			case 6:
+				verbose = 1;
+				break;
 			default:
 				printf("\n"
 				       "%s - grab a color sequence using format0, rgb mode\n\n"
@@ -505,6 +513,7 @@ void get_options(int argc, char *argv[])
 				       "    --time      - specifies seconds to run (default: 86400)\n"
 				       "    --width #   - camera width to use\n"
 				       "    --height #  - camera height to use\n"
+				       "    --verbose   - be verbose\n"
 				       "    --help      - prints this message\n"
 				       "    filename is optional; the default is image%%08d.ppm\n"
 				       "Send SIGHUP to stop smoothly\n\n",
