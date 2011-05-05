@@ -1,7 +1,10 @@
 
 /*
- * $Id: motion_detect.c,v 1.5 2008/06/30 13:57:16 bnv Exp $
+ * $Id: motion_detect.c,v 1.6 2011/05/05 07:59:57 bnv Exp $
  * $Log: motion_detect.c,v $
+ * Revision 1.6  2011/05/05 07:59:57  bnv
+ * Last working version
+ *
  * Revision 1.5  2008/06/30 13:57:16  bnv
  * Added option as camera width and height
  *
@@ -31,14 +34,13 @@
 #include <getopt.h>
 #include <time.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 
 #include <linux/videodev.h>
-
-#define VIDEODEV "/dev/video"
 
 /*
  * Include file for users of JPEG library.
@@ -59,34 +61,46 @@ int DrawText(byte *image, int width, int height, char *txt, int x, int y, int co
 struct video_capability	cap;
 struct video_window	win;
 struct video_picture	vpic;
+struct video_mbuf       membuf;
 
 double	threshold    = 200.0;
 int	time2sleep   = 5;
 int	totalTime    = 86400;
 int	cameraWidth  = -1;
 int	cameraHeight = -1;
+int	stop = 0;
 
+char  videodev[128];
 char *g_filename = "image-%08d.jpg";
 
 static struct option long_options[] = {
-	{"dev", 1, NULL, 0},
-	{"threshold", 1, NULL, 0},
-	{"sleep", 1, NULL, 0},
-	{"time", 1, NULL, 0},
-	{"help", 0, NULL, 0},
-	{"width", 1, NULL, 0},
-	{"height", 1, NULL, 0},
-	{NULL, 0, 0, 0}
+	{"dev",       1, NULL, 0} ,
+	{"threshold", 1, NULL, 0} ,
+	{"sleep",     1, NULL, 0} ,
+	{"time",      1, NULL, 0} ,
+	{"width",     1, NULL, 0} ,
+	{"height",    1, NULL, 0} ,
+	{"help",      0, NULL, 0} ,
+	{NULL,        0, 0,    0}
 };
+
+void sighup_handler(int s)
+{
+	stop = 1;
+} /* sighup_handler */
 
 /* --- get_options --- */
 void get_options(int argc, char *argv[])
 {
 	int option_index = 0;
 
+	strcpy(videodev, "/dev/video0");
 	while (getopt_long(argc, argv, "", long_options, &option_index) >= 0) {
 		switch (option_index) {
 			/* case values must match long_options */
+			case 0:
+				strcpy(videodev, optarg);
+				break;
 			case 1:
 				sscanf(optarg, "%lg", &threshold);
 				break;
@@ -113,7 +127,8 @@ void get_options(int argc, char *argv[])
 				       "    --width #   - camera width to use\n"
 				       "    --height #  - camera height to use\n"
 				       "    --help      - prints this message\n"
-				       "    filename is optional; the default is image%%08d.ppm\n\n",
+				       "    filename is optional; the default is image%%08d.ppm\n"
+				       "Send SIGHUP to stop smoothly\n\n",
 				       argv[0], argv[0]);
 				exit(0);
 		}
@@ -298,7 +313,7 @@ int saveImage(byte *frame)
 
 	now = time(NULL);
 	tmdata = localtime(&now) ;
-	sprintf(str,"%d/%d/%d %d:%02d:%02d",
+	sprintf(str,"%02d.%02d.%04d %d:%02d:%02d",
 			tmdata->tm_mday,
 			tmdata->tm_mon+1,
 			tmdata->tm_year+1900,
@@ -413,8 +428,11 @@ int capture(int fd, byte *buffer, byte *frame)
 	// adjust brightness when told so and using some RGB palette
 //	i = 0;
 	//do {
-	if (read(fd, buffer, (win.width * win.height * src_depth)/8)<0)
+	int len;
+	if ((len=read(fd, buffer, (win.width * win.height * src_depth)/8))<0) {
+		perror("capture.read");
 		return TRUE;
+	}
 
 	src = buffer;
 	dst = frame;
@@ -505,41 +523,71 @@ int capture(int fd, byte *buffer, byte *frame)
 int main(int argc, char *argv[])
 {
 	long	startTime;
-	int	fd;
+	int	fd, i;
 	byte	*buffer, *frame, *prev_frame;
 
+//	signal(SIGHUP, sighup_handler);
 	get_options(argc, argv);
 
-	fd = open(VIDEODEV, O_RDONLY);
+	fd = open(videodev, O_RDONLY);
 	if (fd < 0) {
-		perror(VIDEODEV);
+		perror(videodev);
 		exit(1);
 	}
+
+	memset(&cap,    0, sizeof(cap));
+	memset(&vpic,   0, sizeof(vpic));
+	memset(&win,    0, sizeof(win));
+	memset(&membuf, 0, sizeof(membuf));
 
 	if (ioctl(fd, VIDIOCGCAP, &cap) < 0) {
 		perror("VIDIOGCAP");
-		fprintf(stderr, "(" VIDEODEV " not a video4linux device?)\n");
+		fprintf(stderr, "( %s not a video4linux device?)\n",videodev);
 		close(fd);
 		exit(1);
 	}
+	printf("\nCapabilities\n");
+	printf("\tname=%s\n",cap.name);
+	printf("\ttype=%d\n",cap.type);
+	printf("\tchannels=%d\n",cap.channels);
+	printf("\taudios=%d\n",cap.audios);
+	printf("\tmaxwidth=%d\n",cap.maxwidth);
+	printf("\tmaxheight=%d\n",cap.maxheight);
+	printf("\tminwidth=%d\n",cap.minwidth);
+	printf("\tminheight=%d\n",cap.minheight);
+
+	win.x = win.y = win.width = win.height = win.chromakey = win.flags = 0;
 
 	if (ioctl(fd, VIDIOCGWIN, &win) < 0) {
 		perror("VIDIOCGWIN");
 		close(fd);
 		exit(1);
 	}
+	printf("\nWindow\n");
+	printf("\tx,y=%d,%d\n",win.x,win.y);
+	printf("\tw,h=%d,%d\n",win.width,win.height);
+	printf("\tchromakey=%d\n",win.chromakey);
+	printf("\tclips=%p\n",win.clips);
+	printf("\tclipcount=%d\n",win.clipcount);
 
 	if (ioctl(fd, VIDIOCGPICT, &vpic) < 0) {
 		perror("VIDIOCGPICT");
 		close(fd);
 		exit(1);
 	}
-
+	printf("\nPicture\n");
+	printf("\tbrightness=%d\n",vpic.brightness);
+	printf("\thue=%d\n",vpic.hue);
+	printf("\tcolour=%d\n",vpic.colour);
+	printf("\tcontrast=%d\n",vpic.contrast);
+	printf("\twhiteness=%d\n",vpic.whiteness);
+	printf("\tdepth=%d\n",vpic.depth);
+	printf("\tpalette=%d\n",vpic.palette);
 
 	// Check for video capture
 	if (!(cap.type & VID_TYPE_CAPTURE)) {
 		fprintf(stderr, "error: video4linux device %s cannot capture to memory\n",
-			VIDEODEV);
+			videodev);
 		exit(1);
 	}
 
@@ -554,11 +602,28 @@ int main(int argc, char *argv[])
 	else
 		win.height = cameraHeight;
 
+	win.clips = NULL;
+	win.clipcount = 0;
+
 	if (ioctl(fd, VIDIOCSWIN, &win) < 0) {
 		perror("VIDIOCSWIN");
 		close(fd);
 		exit(1);
 	}
+
+/*
+	if (ioctl(fd, VIDIOCGMBUF, &membuf) < 0) {
+		// failed to retrieve information about capture memory space
+		perror("VIDIOCGMBUF");
+		close(fd);
+		exit(1);
+	}
+	printf("\nMemory Buffer\n");
+	printf("\tsize=%d\n",membuf.size);
+	printf("\tframes=%d\n",membuf.frames);
+	for (i=0; i<membuf.frames; i++)
+		printf("\tframe-%d.offset=%d\n",i,membuf.offsets[i]);
+*/
 
 	buffer     = malloc(win.width * win.height * vpic.depth/8);
 	frame      = malloc(win.width * win.height * 3);	// RGB
@@ -584,7 +649,7 @@ int main(int argc, char *argv[])
 	}
 
 	startTime = timeStamp();
-	while (timeStamp()-startTime<=totalTime) {
+	while (timeStamp()-startTime<=totalTime && !stop) {
 		/*----------------------------------------------------------
 		 *  copy image
 		 *----------------------------------------------------------*/
