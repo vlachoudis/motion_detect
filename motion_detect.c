@@ -1,7 +1,10 @@
 
 /*
- * $Id: motion_detect.c,v 1.6 2011/05/05 07:59:57 bnv Exp $
+ * $Id: motion_detect.c,v 2.0 2011/05/05 08:56:23 bnv Exp $
  * $Log: motion_detect.c,v $
+ * Revision 2.0  2011/05/05 08:56:23  bnv
+ * First version working with V4L2
+ *
  * Revision 1.6  2011/05/05 07:59:57  bnv
  * Last working version
  *
@@ -26,6 +29,7 @@
  */
 
 #include <os.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -40,7 +44,7 @@
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 
-#include <linux/videodev.h>
+#include <linux/videodev2.h>
 
 /*
  * Include file for users of JPEG library.
@@ -58,23 +62,23 @@
 
 int DrawText(byte *image, int width, int height, char *txt, int x, int y, int col);
 
-struct video_capability	cap;
-struct video_window	win;
-struct video_picture	vpic;
-struct video_mbuf       membuf;
+char   videodev[128];
+struct v4l2_capability	cap;
+struct v4l2_format	fmt;
 
-double	threshold    = 200.0;
-int	time2sleep   = 5;
-int	totalTime    = 86400;
-int	cameraWidth  = -1;
-int	cameraHeight = -1;
-int	stop = 0;
+double	threshold          =  200.0;
+int	time2sleep         =  5;
+int	totalTime          =  86400;
+dword	cameraFormat       = -1;
+int	cameraWidth        = -1;
+int	cameraHeight       = -1;
+int	cameraBytesperline = -1;
+int	stop               =  0;
 
-char  videodev[128];
 char *g_filename = "image-%08d.jpg";
 
 static struct option long_options[] = {
-	{"dev",       1, NULL, 0} ,
+	{"device",    1, NULL, 0} ,
 	{"threshold", 1, NULL, 0} ,
 	{"sleep",     1, NULL, 0} ,
 	{"time",      1, NULL, 0} ,
@@ -89,59 +93,6 @@ void sighup_handler(int s)
 	stop = 1;
 } /* sighup_handler */
 
-/* --- get_options --- */
-void get_options(int argc, char *argv[])
-{
-	int option_index = 0;
-
-	strcpy(videodev, "/dev/video0");
-	while (getopt_long(argc, argv, "", long_options, &option_index) >= 0) {
-		switch (option_index) {
-			/* case values must match long_options */
-			case 0:
-				strcpy(videodev, optarg);
-				break;
-			case 1:
-				sscanf(optarg, "%lg", &threshold);
-				break;
-			case 2:
-				sscanf(optarg, "%d", &time2sleep);
-				break;
-			case 3:
-				sscanf(optarg, "%d", &totalTime);
-				break;
-			case 4:
-				sscanf(optarg, "%d", &cameraWidth);
-				break;
-			case 5:
-				sscanf(optarg, "%d", &cameraHeight);
-				break;
-			default:
-				printf("\n"
-				       "%s - grab a color sequence using format0, rgb mode\n\n"
-				       "Usage:\n"
-				       "    %s [--dev=/dev/video0]\n\n"
-				       "    --threshold - specifies RMS threshold to use (default: 200)\n"
-				       "    --sleep     - specifies seconds to sleep (default: 5)\n"
-				       "    --time      - specifies seconds to run (default: 86400)\n"
-				       "    --width #   - camera width to use\n"
-				       "    --height #  - camera height to use\n"
-				       "    --help      - prints this message\n"
-				       "    filename is optional; the default is image%%08d.ppm\n"
-				       "Send SIGHUP to stop smoothly\n\n",
-				       argv[0], argv[0]);
-				exit(0);
-		}
-	}
-	if (optind < argc)
-		g_filename = argv[optind];
-
-	printf("Options\n");
-	printf("\tThreshold\t%g\n", threshold);
-	printf("\tSleep Time\t%d s\n", time2sleep);
-	printf("\tFilename\t%s\n\n", g_filename);
-} /* get_options */
-
 /* --- compareFrames --- */
 int compareFrames(byte *frame, byte *prev_frame)
 {
@@ -149,7 +100,7 @@ int compareFrames(byte *frame, byte *prev_frame)
 	double	sum2 = 0.0;
 	double	rms;
 
-	for (i=0; i<win.width*win.height; i++) {
+	for (i=0; i<cameraWidth*cameraHeight; i++) {
 		double	currGray, prevGray;
 		int	red, green, blue;
 		int	diff;
@@ -172,7 +123,7 @@ int compareFrames(byte *frame, byte *prev_frame)
 		sum2 += diff*diff;
 	}
 
-	rms = sum2/(double)(win.height*win.width);
+	rms = sum2/(double)(cameraHeight*cameraWidth);
 	printf("SUM2=%lg RMS=%lg\n", sum2, rms);
 
 	return (rms>threshold);
@@ -246,8 +197,8 @@ GLOBAL(void) writeJPEGFile(char *filename, int quality, byte *frame)
 	 * Four fields of the cinfo struct must be filled in:
 	 */
 	/* image width and height, in pixels */
-	cinfo.image_width      = win.width;
-	cinfo.image_height     = win.height;
+	cinfo.image_width      = cameraWidth;
+	cinfo.image_height     = cameraHeight;
 	cinfo.input_components = 3;		/* # of color components per pixel */
 	cinfo.in_color_space = JCS_RGB;	/* colorspace of input image */
 	/* Now use the library's routine to set default compression parameters.
@@ -275,7 +226,7 @@ GLOBAL(void) writeJPEGFile(char *filename, int quality, byte *frame)
 	 * To keep things simple, we pass one scanline per call; you can pass
 	 * more if you wish, though.
 	 */
-	row_stride = win.width * 3;	/* JSAMPLEs per row in image_buffer */
+	row_stride = cameraWidth * 3;	/* JSAMPLEs per row in image_buffer */
 
 	while (cinfo.next_scanline < cinfo.image_height) {
 		/* jpeg_write_scanlines expects an array of pointers to scanlines.
@@ -322,9 +273,9 @@ int saveImage(byte *frame)
 			tmdata->tm_sec);
 
 	xt = 5;
-	yt = win.height-24;
-	DrawText(frame, win.width, win.height, str, xt, yt, 0x1F1F1F);
-	DrawText(frame, win.width, win.height, str, xt-2, yt-2, 0xFFFF7F);
+	yt = cameraHeight-24;
+	DrawText(frame, cameraWidth, cameraHeight, str, xt, yt, 0x1F1F1F);
+	DrawText(frame, cameraWidth, cameraHeight, str, xt-2, yt-2, 0xFFFF7F);
 
 	sprintf(filename, g_filename, timeStamp());
 	writeJPEGFile(filename, 80, frame);
@@ -335,7 +286,7 @@ int saveImage(byte *frame)
 {                                                                       \
 	switch (format)                                                 \
 	{                                                               \
-		case VIDEO_PALETTE_GREY:                                \
+		case V4L2_PIX_FMT_GREY:                                 \
 			switch (depth)                                  \
 			{                                               \
 				case 4:                                 \
@@ -353,7 +304,7 @@ int saveImage(byte *frame)
 			break;                                          \
 									\
 									\
-		case VIDEO_PALETTE_RGB565:                              \
+		case V4L2_PIX_FMT_RGB565:                               \
 		{                                                       \
 			unsigned short tmp = *(unsigned short *)buf;    \
 			(r) = tmp&0xF800;                               \
@@ -363,14 +314,14 @@ int saveImage(byte *frame)
 		}                                                       \
 		break;                                                  \
 									\
-		case VIDEO_PALETTE_RGB555:                              \
+		case V4L2_PIX_FMT_RGB555:                               \
 			(r) = (buf[0]&0xF8)<<8;                         \
 			(g) = ((buf[0] << 5 | buf[1] >> 3)&0xF8)<<8;    \
 			(b) = ((buf[1] << 2 ) & 0xF8)<<8;               \
 			buf += 2;                                       \
 			break;                                          \
 									\
-		case VIDEO_PALETTE_RGB24:                               \
+		case V4L2_PIX_FMT_RGB24:                                \
 			(r) = buf[0] << 8; (g) = buf[1] << 8;           \
 			(b) = buf[2] << 8;                              \
 			buf += 3;                                       \
@@ -391,6 +342,7 @@ static void yuv2rgb(int y, int u, int v, int *r, int *g, int *b)
 
 	/* Even with proper conversion, some values still need clipping. */
 	if (*r > 255) *r = 255;
+	int	i;
 	if (*g > 255) *g = 255;
 	if (*b > 255) *b = 255;
 	if (*r < 0) *r = 0;
@@ -404,17 +356,14 @@ static void yuv2rgb(int y, int u, int v, int *r, int *g, int *b)
 } /* yuv2rgb */
 
 /* --- is_yuv --- */
-static int is_yuv(uint16_t palette)
+static inline int is_yuv()
 {
-	return ((palette == VIDEO_PALETTE_YUV422)  ||
-		(palette == VIDEO_PALETTE_YUYV)    ||
-		(palette == VIDEO_PALETTE_UYVY)    ||
-		(palette == VIDEO_PALETTE_YUV420)  ||
-		(palette == VIDEO_PALETTE_YUV411)  ||
-		(palette == VIDEO_PALETTE_YUV422P) ||
-		(palette == VIDEO_PALETTE_YUV411P) ||
-		(palette == VIDEO_PALETTE_YUV420P) ||
-		(palette == VIDEO_PALETTE_YUV410P));
+	return (
+		(cameraFormat == V4L2_PIX_FMT_YUYV)    ||
+		(cameraFormat == V4L2_PIX_FMT_UYVY)    ||
+		(cameraFormat == V4L2_PIX_FMT_YUV420)  ||
+		(cameraFormat == V4L2_PIX_FMT_YUV422P) ||
+		(cameraFormat == V4L2_PIX_FMT_YUV411P));
 } /* is_yuv */
 
 /* --- capture --- */
@@ -423,28 +372,28 @@ int capture(int fd, byte *buffer, byte *frame)
 	int	i;
 	byte	*src, *dst;
 	int	y, u, v, r, g, b;
-	unsigned src_depth = vpic.depth;
+//	unsigned src_depth = vpic.depth;
 
 	// adjust brightness when told so and using some RGB palette
 //	i = 0;
 	//do {
 	int len;
-	if ((len=read(fd, buffer, (win.width * win.height * src_depth)/8))<0) {
+	if ((len=read(fd, buffer, cameraBytesperline * cameraHeight))<0) {
 		perror("capture.read");
 		return TRUE;
 	}
 
 	src = buffer;
 	dst = frame;
-	for (i=0; i<win.width*win.height; i++) {
+	for (i=0; i<cameraWidth*cameraHeight; i++) {
 		/*
-		if (!is_yuv(vpic.palette)) {
-			READ_VIDEO_PIXEL(src, vpic.palette, src_depth, r, g, b);
+		if (!is_yuv(cameraFormat)) {
+			READ_VIDEO_PIXEL(src, cameraFormat, src_depth, r, g, b);
 			*src++ = r;
 			*src++ = g;
 			*src++ = b;
 		}
-		else if (vpic.palette == VIDEO_PALETTE_UYVY) {
+		else if (cameraFormat == V4L2_PIX_FMT_UYVY) {
 			if(i==0) v = src[3];
 			if((i%2) == 0) {
 				u = src[0];
@@ -456,8 +405,8 @@ int capture(int fd, byte *buffer, byte *frame)
 				src += 2;
 			}
 		}
-		else if ((vpic.palette == VIDEO_PALETTE_YUYV) ||
-			  (vpic.palette == VIDEO_PALETTE_YUV422)) {
+		else if ((cameraFormat == V4L2_PIX_FMT_YUYV) ||
+			  (cameraFormat == V4L2_PIX_FMT_YUV422)) {
 			if(i==0)
 				v = src[4];
 			if((i%2) == 0) {
@@ -470,45 +419,45 @@ int capture(int fd, byte *buffer, byte *frame)
 				src += 2;
 			}
 		}
-		else if (vpic.palette == VIDEO_PALETTE_YUV422P) {
+		else if (cameraFormat == V4L2_PIX_FMT_YUV422P) {
 			y = buffer[i];
 			if (i == 0)
-				src = buffer + (win.width*win.height);
-			u = src[(i/2)%(win.width/2)];
-			v = src[(win.width*win.height)/2 + (i/2)%(win.width/2)];
-			if (i && (i%(win.width*2) == 0))
-				src += win.width;
+				src = buffer + (cameraWidth*cameraHeight);
+			u = src[(i/2)%(cameraWidth/2)];
+			v = src[(cameraWidth*cameraHeight)/2 + (i/2)%(cameraWidth/2)];
+			if (i && (i%(cameraWidth*2) == 0))
+				src += cameraWidth;
 		}
-		else if(vpic.palette == VIDEO_PALETTE_YUV411P) {
+		else if(cameraFormat == V4L2_PIX_FMT_YUV411P) {
 			y = buffer[i];
 			if (i == 0)
-				src = buffer + (win.width*win.height);
-			u = src[(i/4)%(win.width/4)];
-			v = src[(win.width*win.height)/4 + (i/4)%(win.width/4)];
-			if (i && (i%(win.width) == 0))
-				src += win.width/4;
+				src = buffer + (cameraWidth*cameraHeight);
+			u = src[(i/4)%(cameraWidth/4)];
+			v = src[(cameraWidth*cameraHeight)/4 + (i/4)%(cameraWidth/4)];
+			if (i && (i%(cameraWidth) == 0))
+				src += cameraWidth/4;
 		}
 		else
 		*/
-		if((vpic.palette == VIDEO_PALETTE_YUV420P) ||
-			  (vpic.palette == VIDEO_PALETTE_YUV420)) {
+		if ((cameraFormat == V4L2_PIX_FMT_YUV420M) ||
+		    (cameraFormat == V4L2_PIX_FMT_YUV420)) {
 			if (i == 0)
-				src = buffer + (win.width*win.height);
+				src = buffer + (cameraWidth*cameraHeight);
 			y = buffer[i];
-			u = src[(i/2)%(win.width/2)];
-			v = src[(win.width*win.height)/4 + (i/2)%(win.width/2)];
-			if (i && (i%(win.width*4)) == 0)
-				src += win.width;
+			u = src[(i/2)%(cameraWidth/2)];
+			v = src[(cameraWidth*cameraHeight)/4 + (i/2)%(cameraWidth/2)];
+			if (i && (i%(cameraWidth*4)) == 0)
+				src += cameraWidth;
 		}
 		/*
-		else if(vpic.palette == VIDEO_PALETTE_YUV410P) {
+		else if(cameraFormat == V4L2_PIX_FMT_YUV410P) {
 			if (i == 0)
-				src = buffer + (win.width*win.height);
+				src = buffer + (cameraWidth*cameraHeight);
 			y = buffer[i];
-			u = src[(i/4)%(win.width/4)];
-			v = src[(win.width*win.height)/16 + (i/4)%(win.width/4)];
-			if (i && (i%(win.width*4)) == 0)
-				src += win.width/4;
+			u = src[(i/4)%(cameraWidth/4)];
+			v = src[(cameraWidth*cameraHeight)/16 + (i/4)%(cameraWidth/4)];
+			if (i && (i%(cameraWidth*4)) == 0)
+				src += cameraWidth/4;
 		}
 		*/
 		yuv2rgb(y, u, v, &r, &g, &b);
@@ -519,14 +468,68 @@ int capture(int fd, byte *buffer, byte *frame)
 	return 0;
 } /* capture */
 
+/* --- get_options --- */
+void get_options(int argc, char *argv[])
+{
+	int option_index = 0;
+
+	strcpy(videodev, "/dev/video0");
+	while (getopt_long(argc, argv, "", long_options, &option_index) >= 0) {
+		switch (option_index) {
+			/* case values must match long_options */
+			case 0:
+				strcpy(videodev, optarg);
+				break;
+			case 1:
+				sscanf(optarg, "%lg", &threshold);
+				break;
+			case 2:
+				sscanf(optarg, "%d", &time2sleep);
+				break;
+			case 3:
+				sscanf(optarg, "%d", &totalTime);
+				break;
+			case 4:
+				sscanf(optarg, "%d", &cameraWidth);
+				break;
+			case 5:
+				sscanf(optarg, "%d", &cameraHeight);
+				break;
+			default:
+				printf("\n"
+				       "%s - grab a color sequence using format0, rgb mode\n\n"
+				       "Usage:\n"
+				       "    %s [--device=/dev/video0]\n\n"
+				       "    --threshold - specifies RMS threshold to use (default: 200)\n"
+				       "    --sleep     - specifies seconds to sleep (default: 5)\n"
+				       "    --time      - specifies seconds to run (default: 86400)\n"
+				       "    --width #   - camera width to use\n"
+				       "    --height #  - camera height to use\n"
+				       "    --help      - prints this message\n"
+				       "    filename is optional; the default is image%%08d.ppm\n"
+				       "Send SIGHUP to stop smoothly\n\n",
+				       argv[0], argv[0]);
+				exit(0);
+		}
+	}
+	if (optind < argc)
+		g_filename = argv[optind];
+
+	printf("Options\n");
+	printf("\tThreshold\t%g\n", threshold);
+	printf("\tSleep Time\t%d s\n", time2sleep);
+	printf("\tFilename\t%s\n\n", g_filename);
+} /* get_options */
+
+
 /* --- main --- */
 int main(int argc, char *argv[])
 {
 	long	startTime;
-	int	fd, i;
+	int	fd;
 	byte	*buffer, *frame, *prev_frame;
 
-//	signal(SIGHUP, sighup_handler);
+	signal(SIGHUP, sighup_handler);
 	get_options(argc, argv);
 
 	fd = open(videodev, O_RDONLY);
@@ -536,98 +539,79 @@ int main(int argc, char *argv[])
 	}
 
 	memset(&cap,    0, sizeof(cap));
-	memset(&vpic,   0, sizeof(vpic));
-	memset(&win,    0, sizeof(win));
-	memset(&membuf, 0, sizeof(membuf));
+	memset(&fmt,    0, sizeof(fmt));
 
-	if (ioctl(fd, VIDIOCGCAP, &cap) < 0) {
-		perror("VIDIOGCAP");
-		fprintf(stderr, "( %s not a video4linux device?)\n",videodev);
+	/* Query capabilities */
+	if (ioctl(fd, VIDIOC_QUERYCAP, &cap) < 0) {
+		perror("VIDIOC_QUERYCAP");
+		fprintf(stderr, "Error %d: %s not a video4linux2 device?\n",errno,videodev);
 		close(fd);
-		exit(1);
+		exit(errno);
+	}
+	if (!(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE)) {
+		fprintf(stderr, "Error: %s not a video capture device.\n",videodev);
+		close(fd);
+		exit(errno);
+	}
+	if (!(cap.capabilities & V4L2_CAP_READWRITE)) {
+		fprintf(stderr, "Error: %s does not support read i/o.\n",videodev);
+		close(fd);
+		exit(errno);
+	}
+	if (!(cap.capabilities & V4L2_CAP_STREAMING)) {
+		fprintf(stderr, "Error: %s does not support streaming i/o.\n",videodev);
+		close(fd);
+		exit(errno);
 	}
 	printf("\nCapabilities\n");
-	printf("\tname=%s\n",cap.name);
-	printf("\ttype=%d\n",cap.type);
-	printf("\tchannels=%d\n",cap.channels);
-	printf("\taudios=%d\n",cap.audios);
-	printf("\tmaxwidth=%d\n",cap.maxwidth);
-	printf("\tmaxheight=%d\n",cap.maxheight);
-	printf("\tminwidth=%d\n",cap.minwidth);
-	printf("\tminheight=%d\n",cap.minheight);
+	printf("\tdevice:       %s\n",videodev);
+	printf("\tdriver:       %s\n",cap.driver);
+	printf("\tcard:         %s\n",cap.card);
+	printf("\tbus_info:     %s\n",cap.bus_info);
+	printf("\tversion:      0x%08X\n",cap.version);
+	printf("\tcapabilities: 0x%08X\n",cap.capabilities);
 
-	win.x = win.y = win.width = win.height = win.chromakey = win.flags = 0;
-
-	if (ioctl(fd, VIDIOCGWIN, &win) < 0) {
-		perror("VIDIOCGWIN");
+	/* Read capture format */
+	fmt.type                = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	if (ioctl(fd, VIDIOC_G_FMT, &fmt) < 0) {
+		perror("VIDIOC_G_FMT");
+		fprintf(stderr,"RC=%d\n", errno);
 		close(fd);
-		exit(1);
+		exit(errno);
 	}
-	printf("\nWindow\n");
-	printf("\tx,y=%d,%d\n",win.x,win.y);
-	printf("\tw,h=%d,%d\n",win.width,win.height);
-	printf("\tchromakey=%d\n",win.chromakey);
-	printf("\tclips=%p\n",win.clips);
-	printf("\tclipcount=%d\n",win.clipcount);
+	/* Setup capture format */
+	if (cameraWidth>0)  fmt.fmt.pix.width       = cameraWidth;
+	if (cameraHeight>0) fmt.fmt.pix.height      = cameraHeight;
 
-	if (ioctl(fd, VIDIOCGPICT, &vpic) < 0) {
-		perror("VIDIOCGPICT");
+	if (ioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
+		perror("VIDIOC_S_FMT");
+		fprintf(stderr,"RC=%d\n", errno);
 		close(fd);
-		exit(1);
-	}
-	printf("\nPicture\n");
-	printf("\tbrightness=%d\n",vpic.brightness);
-	printf("\thue=%d\n",vpic.hue);
-	printf("\tcolour=%d\n",vpic.colour);
-	printf("\tcontrast=%d\n",vpic.contrast);
-	printf("\twhiteness=%d\n",vpic.whiteness);
-	printf("\tdepth=%d\n",vpic.depth);
-	printf("\tpalette=%d\n",vpic.palette);
-
-	// Check for video capture
-	if (!(cap.type & VID_TYPE_CAPTURE)) {
-		fprintf(stderr, "error: video4linux device %s cannot capture to memory\n",
-			videodev);
-		exit(1);
+		exit(errno);
 	}
 
-	// Use maximum resolution
-	if (cameraWidth < 0)
-		win.width  = cap.maxwidth;
-	else
-		win.width  = cameraWidth;
+	/* read back the new information */
+	ioctl(fd, VIDIOC_G_FMT, &fmt);
+	cameraWidth        = fmt.fmt.pix.width;
+	cameraHeight       = fmt.fmt.pix.height;
+	cameraBytesperline = fmt.fmt.pix.bytesperline;
+	cameraFormat       = fmt.fmt.pix.pixelformat;
 
-	if (cameraHeight < 0)
-		win.height = cap.maxheight;
-	else
-		win.height = cameraHeight;
+	printf("\nCamera Format\n");
+	printf("\twidth:        %d\n",cameraWidth);
+	printf("\theight:       %d\n",cameraHeight);
+	printf("\tpixelformat:  %c%c%c%c\n",
+				 cameraFormat&0xFF,
+				(cameraFormat>>8)&0xFF,
+				(cameraFormat>>16)&0xFF,
+				(cameraFormat>>24)&0xFF);
+	printf("\tfield:        %d\n",fmt.fmt.pix.field);
+	printf("\tbytesperline: %d\n",cameraBytesperline);
+	printf("\tcolorspace:   %d\n",fmt.fmt.pix.colorspace);
 
-	win.clips = NULL;
-	win.clipcount = 0;
-
-	if (ioctl(fd, VIDIOCSWIN, &win) < 0) {
-		perror("VIDIOCSWIN");
-		close(fd);
-		exit(1);
-	}
-
-/*
-	if (ioctl(fd, VIDIOCGMBUF, &membuf) < 0) {
-		// failed to retrieve information about capture memory space
-		perror("VIDIOCGMBUF");
-		close(fd);
-		exit(1);
-	}
-	printf("\nMemory Buffer\n");
-	printf("\tsize=%d\n",membuf.size);
-	printf("\tframes=%d\n",membuf.frames);
-	for (i=0; i<membuf.frames; i++)
-		printf("\tframe-%d.offset=%d\n",i,membuf.offsets[i]);
-*/
-
-	buffer     = malloc(win.width * win.height * vpic.depth/8);
-	frame      = malloc(win.width * win.height * 3);	// RGB
-	prev_frame = malloc(win.width * win.height * 3);	// RGB
+	buffer     = malloc(cameraBytesperline * cameraHeight);
+	frame      = malloc(cameraWidth * cameraHeight * 3);	// RGB
+	prev_frame = malloc(cameraWidth * cameraHeight * 3);	// RGB
 	if (!buffer || !frame || !prev_frame) {
 		fprintf(stderr, "Out of memory.\n");
 		exit(1);
@@ -653,7 +637,7 @@ int main(int argc, char *argv[])
 		/*----------------------------------------------------------
 		 *  copy image
 		 *----------------------------------------------------------*/
-		memcpy(prev_frame, frame, win.width * win.height * 3);
+		memcpy(prev_frame, frame, cameraWidth * cameraHeight * 3);
 		sleep(time2sleep);
 
 		/*----------------------------------------------------------
