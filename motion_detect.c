@@ -1,7 +1,10 @@
 
 /*
- * $Id: motion_detect.c,v 2.1 2011/05/05 09:08:47 bnv Exp $
+ * $Id: motion_detect.c,v 2.2 2013/03/08 16:35:25 bnv Exp $
  * $Log: motion_detect.c,v $
+ * Revision 2.2  2013/03/08 16:35:25  bnv
+ * Corrected YUV420 and reading buffer
+ *
  * Revision 2.1  2011/05/05 09:08:47  bnv
  * Minor change
  *
@@ -63,34 +66,46 @@
 #define MAX_PORTS 4
 #define MAX_RESETS 10
 
+typedef enum {
+	IO_METHOD_READ,
+	IO_METHOD_MMAP,
+	IO_METHOD_USERPTR,
+} io_method;
+
 int DrawText(byte *image, int width, int height, char *txt, int x, int y, int col);
 
 char   videodev[128];
+static io_method	io  = IO_METHOD_MMAP;
 struct v4l2_capability	cap;
 struct v4l2_format	fmt;
 
 double	threshold          =  200.0;
-int	time2sleep         =  5;
 int	totalTime          =  86400;
 dword	cameraFormat       = -1;
 int	cameraWidth        = -1;
 int	cameraHeight       = -1;
+int	cameraSize         = -1;
 int	cameraBytesperline = -1;
 int	stop               =  0;
 int	verbose            =  0;
+useconds_t	time2sleep =  1000000;
 
-char *g_filename = "image-%08d.jpg";
+char *g_filename = "image-%05d.jpg";
 
+static const char short_options [] = "d:T:s:t:w:h:vmru?";
 static struct option long_options[] = {
-	{"device",    1, NULL, 0} ,
-	{"threshold", 1, NULL, 0} ,
-	{"sleep",     1, NULL, 0} ,
-	{"time",      1, NULL, 0} ,
-	{"width",     1, NULL, 0} ,
-	{"height",    1, NULL, 0} ,
-	{"verbose",   0, NULL, 0} ,
-	{"help",      0, NULL, 0} ,
-	{NULL,        0, 0,    0}
+	{"device",    required_argument, NULL, 'd'} ,
+	{"threshold", required_argument, NULL, 'T'} ,
+	{"sleep",     required_argument, NULL, 's'} ,
+	{"time",      required_argument, NULL, 't'} ,
+	{"width",     required_argument, NULL, 'w'} ,
+	{"height",    required_argument, NULL, 'h'} ,
+	{"verbose",   no_argument,       NULL, 'v'} ,
+	{"mmap",      no_argument,       NULL, 'm'} ,
+	{"read",      no_argument,       NULL, 'r'} ,
+	{"userptr",   no_argument,       NULL, 'u'} ,
+	{"help",      no_argument,       NULL, '?'} ,
+	{NULL, 0, 0, 0}
 };
 
 void sighup_handler(int s)
@@ -267,6 +282,7 @@ int saveImage(byte *frame)
 	time_t	now;
 	struct tm *tmdata ;
 	int	xt, yt;
+static	int	idx = 0;
 
 	now = time(NULL);
 	tmdata = localtime(&now) ;
@@ -283,7 +299,7 @@ int saveImage(byte *frame)
 	DrawText(frame, cameraWidth, cameraHeight, str, xt, yt, 0x1F1F1F);
 	DrawText(frame, cameraWidth, cameraHeight, str, xt-2, yt-2, 0xFFFF7F);
 
-	sprintf(filename, g_filename, timeStamp());
+	sprintf(filename, g_filename, idx++);
 	writeJPEGFile(filename, 80, frame);
 	return 0;
 } /* saveImage */
@@ -374,23 +390,27 @@ static inline int is_yuv()
 /* --- capture --- */
 int capture(int fd, byte *buffer, byte *frame)
 {
-	int	i;
+	int	i, row, col;
 	byte	*src, *dst;
-	int	y, u, v, r, g, b;
+	int	y, u, v, r, g, b, size;
 //	unsigned src_depth = vpic.depth;
 
 	// adjust brightness when told so and using some RGB palette
 //	i = 0;
 	//do {
 	int len;
-	if ((len=read(fd, buffer, cameraBytesperline * cameraHeight))<0) {
+	if ((len=read(fd, buffer, cameraSize))<0) {
 		perror("capture.read");
+		fprintf(stderr,"RC=%d\n", errno);
 		return TRUE;
 	}
 
 	src = buffer;
 	dst = frame;
-	for (i=0; i<cameraWidth*cameraHeight; i++) {
+	size = cameraHeight * cameraWidth;
+
+	for (i=row=0; row<cameraHeight; row++)
+		for (col=0; col<cameraWidth; col++, i++) {
 		/*
 		if (!is_yuv(cameraFormat)) {
 			READ_VIDEO_PIXEL(src, cameraFormat, src_depth, r, g, b);
@@ -410,8 +430,9 @@ int capture(int fd, byte *buffer, byte *frame)
 				src += 2;
 			}
 		}
-		else if ((cameraFormat == V4L2_PIX_FMT_YUYV) ||
-			  (cameraFormat == V4L2_PIX_FMT_YUV422)) {
+		*/
+		if (cameraFormat == V4L2_PIX_FMT_YUYV) {
+//			  (cameraFormat == V4L2_PIX_FMT_YUV422)) {
 			if(i==0)
 				v = src[4];
 			if((i%2) == 0) {
@@ -424,6 +445,7 @@ int capture(int fd, byte *buffer, byte *frame)
 				src += 2;
 			}
 		}
+		/*
 		else if (cameraFormat == V4L2_PIX_FMT_YUV422P) {
 			y = buffer[i];
 			if (i == 0)
@@ -444,13 +466,14 @@ int capture(int fd, byte *buffer, byte *frame)
 		}
 		else
 		*/
-		if ((cameraFormat == V4L2_PIX_FMT_YUV420M) ||
-		    (cameraFormat == V4L2_PIX_FMT_YUV420)) {
+		//if ((cameraFormat == V4L2_PIX_FMT_YUV420M) ||
+		else
+		if (cameraFormat == V4L2_PIX_FMT_YUV420) {
 			if (i == 0)
 				src = buffer + (cameraWidth*cameraHeight);
 			y = buffer[i];
 			u = src[(i/2)%(cameraWidth/2)];
-			v = src[(cameraWidth*cameraHeight)/4 + (i/2)%(cameraWidth/2)];
+			v = src[(size)/4 + (i/2)%(cameraWidth/2)];
 			if (i && (i%(cameraWidth*4)) == 0)
 				src += cameraWidth;
 		}
@@ -476,44 +499,63 @@ int capture(int fd, byte *buffer, byte *frame)
 /* --- get_options --- */
 void get_options(int argc, char *argv[])
 {
+	int c;
 	int option_index = 0;
+	double sleeps;
 
 	strcpy(videodev, "/dev/video0");
-	while (getopt_long(argc, argv, "", long_options, &option_index) >= 0) {
-		switch (option_index) {
+	while ((c=getopt_long(argc, argv,
+			short_options, long_options, &option_index)) >= 0) {
+                switch (c) {
 			/* case values must match long_options */
-			case 0:
+			case 'd':
 				strcpy(videodev, optarg);
 				break;
-			case 1:
-				sscanf(optarg, "%lg", &threshold);
+			case 'T':
+				threshold = atof(optarg);
 				break;
-			case 2:
-				sscanf(optarg, "%d", &time2sleep);
+			case 's':
+				sleeps = atof(optarg);
+				time2sleep = (useconds_t)(sleeps*1.0e6);
 				break;
-			case 3:
-				sscanf(optarg, "%d", &totalTime);
+			case 't':
+				totalTime = atoi(optarg);
 				break;
-			case 4:
-				sscanf(optarg, "%d", &cameraWidth);
+			case 'w':
+				cameraWidth = atoi(optarg);
 				break;
-			case 5:
-				sscanf(optarg, "%d", &cameraHeight);
+			case 'h':
+				cameraHeight = atoi(optarg);
 				break;
-			case 6:
+			case 'v':
 				verbose = 1;
 				break;
+			case 'm':
+				io = IO_METHOD_MMAP;
+				fprintf(stderr,"MMAP: Not implemented for the moment\n");
+				exit(0);
+				break;
+			case 'r':
+				io = IO_METHOD_READ;
+				break;
+			case 'u':
+				fprintf(stderr,"USERPTR: Not implemented for the moment\n");
+				io = IO_METHOD_USERPTR;
+				exit(0);
+				break;
+
 			default:
 				printf("\n"
 				       "%s - grab a color sequence using format0, rgb mode\n\n"
 				       "Usage:\n"
 				       "    %s [--device=/dev/video0]\n\n"
 				       "    --threshold - specifies RMS threshold to use (default: 200)\n"
-				       "    --sleep     - specifies seconds to sleep (default: 5)\n"
+				       "    --sleep     - specifies seconds to sleep (default: 1.0)\n"
 				       "    --time      - specifies seconds to run (default: 86400)\n"
 				       "    --width #   - camera width to use\n"
 				       "    --height #  - camera height to use\n"
 				       "    --verbose   - be verbose\n"
+				       "    --mmap      - be verbose\n"
 				       "    --help      - prints this message\n"
 				       "    filename is optional; the default is image%%08d.ppm\n"
 				       "Send SIGHUP to stop smoothly\n\n",
@@ -526,7 +568,7 @@ void get_options(int argc, char *argv[])
 
 	printf("Options\n");
 	printf("\tThreshold\t%g\n", threshold);
-	printf("\tSleep Time\t%d s\n", time2sleep);
+	printf("\tSleep Time\t%g s\n", (double)time2sleep/1.0E6);
 	printf("\tFilename\t%s\n\n", g_filename);
 } /* get_options */
 
@@ -562,15 +604,18 @@ int main(int argc, char *argv[])
 		close(fd);
 		exit(errno);
 	}
-	if (!(cap.capabilities & V4L2_CAP_READWRITE)) {
-		fprintf(stderr, "Error: %s does not support read i/o.\n",videodev);
-		close(fd);
-		exit(errno);
-	}
-	if (!(cap.capabilities & V4L2_CAP_STREAMING)) {
-		fprintf(stderr, "Error: %s does not support streaming i/o.\n",videodev);
-		close(fd);
-		exit(errno);
+	if (io==IO_METHOD_READ) {
+		if (!(cap.capabilities & V4L2_CAP_READWRITE)) {
+			fprintf(stderr, "Error: %s does not support read i/o.\n",videodev);
+			close(fd);
+			exit(errno);
+		}
+	} else {
+		if (!(cap.capabilities & V4L2_CAP_STREAMING)) {
+			fprintf(stderr, "Error: %s does not support streaming i/o.\n",videodev);
+			close(fd);
+			exit(errno);
+		}
 	}
 	printf("\nCapabilities\n");
 	printf("\tdevice:       %s\n",videodev);
@@ -581,7 +626,7 @@ int main(int argc, char *argv[])
 	printf("\tcapabilities: 0x%08X\n",cap.capabilities);
 
 	/* Read capture format */
-	fmt.type                = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	fmt.type  = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	if (ioctl(fd, VIDIOC_G_FMT, &fmt) < 0) {
 		perror("VIDIOC_G_FMT");
 		fprintf(stderr,"RC=%d\n", errno);
@@ -603,6 +648,7 @@ int main(int argc, char *argv[])
 	ioctl(fd, VIDIOC_G_FMT, &fmt);
 	cameraWidth        = fmt.fmt.pix.width;
 	cameraHeight       = fmt.fmt.pix.height;
+	cameraSize         = fmt.fmt.pix.sizeimage;
 	cameraBytesperline = fmt.fmt.pix.bytesperline;
 	cameraFormat       = fmt.fmt.pix.pixelformat;
 
@@ -616,9 +662,10 @@ int main(int argc, char *argv[])
 				(cameraFormat>>24)&0xFF);
 	printf("\tfield:        %d\n",fmt.fmt.pix.field);
 	printf("\tbytesperline: %d\n",cameraBytesperline);
+	printf("\tsizeimage:    %d\n",cameraSize);
 	printf("\tcolorspace:   %d\n",fmt.fmt.pix.colorspace);
 
-	buffer     = malloc(cameraBytesperline * cameraHeight);
+	buffer     = malloc(cameraSize);
 	frame      = malloc(cameraWidth * cameraHeight * 3);	// RGB
 	prev_frame = malloc(cameraWidth * cameraHeight * 3);	// RGB
 	if (!buffer || !frame || !prev_frame) {
@@ -647,7 +694,7 @@ int main(int argc, char *argv[])
 		 *  copy image
 		 *----------------------------------------------------------*/
 		memcpy(prev_frame, frame, cameraWidth * cameraHeight * 3);
-		sleep(time2sleep);
+		usleep(time2sleep);
 
 		/*----------------------------------------------------------
 		 *  capture next image
