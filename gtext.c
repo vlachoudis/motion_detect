@@ -1,6 +1,9 @@
 /*
- * $Header: /home/bnv/prg/multimedia/motion_detect/RCS/gtext.c,v 1.3 2007/12/09 13:26:02 bnv Exp $
+ * $Header: /home/bnv/prg/multimedia/motion_detect/RCS/gtext.c,v 1.4 2013/03/14 08:28:21 bnv Exp $
  * $Log: gtext.c,v $
+ * Revision 1.4  2013/03/14 08:28:21  bnv
+ * comments
+ *
  * Revision 1.3  2007/12/09 13:26:02  bnv
  * Changed to use V4L
  *
@@ -13,6 +16,8 @@
  * Revision 1.1  96/10/18  10:01:10  10:01:10  bnv (Vassilis Vlachoudis)
  * Initial revision
  *
+ * Author:	Vasilis.Vlachoudis@cern.ch
+ * Date:	2002
  */
 
 #include <os.h>
