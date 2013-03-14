@@ -1,7 +1,10 @@
 
 /*
- * $Id: motion_detect.c,v 2.2 2013/03/08 16:35:25 bnv Exp $
+ * $Id: motion_detect.c,v 2.3 2013/03/14 08:28:21 bnv Exp $
  * $Log: motion_detect.c,v $
+ * Revision 2.3  2013/03/14 08:28:21  bnv
+ * Help corrected
+ *
  * Revision 2.2  2013/03/08 16:35:25  bnv
  * Corrected YUV420 and reading buffer
  *
@@ -555,7 +558,7 @@ void get_options(int argc, char *argv[])
 				       "    --width #   - camera width to use\n"
 				       "    --height #  - camera height to use\n"
 				       "    --verbose   - be verbose\n"
-				       "    --mmap      - be verbose\n"
+				       "    --mmap      - Mapping (not implemented)\n"
 				       "    --help      - prints this message\n"
 				       "    filename is optional; the default is image%%08d.ppm\n"
 				       "Send SIGHUP to stop smoothly\n\n",
