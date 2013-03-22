@@ -1,7 +1,10 @@
 
 /*
- * $Id: motion_detect.c,v 3.0 2013/03/22 09:18:01 bnv Exp $
+ * $Id: motion_detect.c,v 3.1 2013/03/22 09:21:39 bnv Exp $
  * $Log: motion_detect.c,v $
+ * Revision 3.1  2013/03/22 09:21:39  bnv
+ * Added printout of total time
+ *
  * Revision 3.0  2013/03/22 09:18:01  bnv
  * Moved to RGB formating and using the v4l2 decoding
  *
@@ -403,6 +406,7 @@ void get_options(int argc, char *argv[])
 	printf("Options\n");
 	printf("\tThreshold\t%g\n", threshold);
 	printf("\tSleep Time\t%g s\n", (double)time2sleep/1.0E6);
+	printf("\tRun Time\t%d s\n", totalTime);
 	printf("\tFilename\t%s\n\n", g_filename);
 } /* get_options */
 
