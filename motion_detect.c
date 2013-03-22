@@ -1,7 +1,10 @@
 
 /*
- * $Id: motion_detect.c,v 2.4 2013/03/22 08:17:53 bnv Exp $
+ * $Id: motion_detect.c,v 3.0 2013/03/22 09:18:01 bnv Exp $
  * $Log: motion_detect.c,v $
+ * Revision 3.0  2013/03/22 09:18:01  bnv
+ * Moved to RGB formating and using the v4l2 decoding
+ *
  * Revision 2.4  2013/03/22 08:17:53  bnv
  * Print out of information
  *
@@ -35,7 +38,6 @@
  * Revision 1.1  2006/01/10 14:13:32  bnv
  * Initial revision
  *
- *
  * Author:	Vasilis.Vlachoudis@cern.ch
  * Date:	28-Jan-2005
  */
@@ -56,7 +58,9 @@
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 
+#include <sys/mman.h>
 #include <linux/videodev2.h>
+#include "libv4l2.h"
 
 /*
  * Include file for users of JPEG library.
@@ -72,53 +76,69 @@
 #define MAX_PORTS 4
 #define MAX_RESETS 10
 
-typedef enum {
-	IO_METHOD_READ,
-	IO_METHOD_MMAP,
-	IO_METHOD_USERPTR,
-} io_method;
-
 int DrawText(byte *image, int width, int height, char *txt, int x, int y, int col);
 
 char   videodev[128];
-static io_method	io  = IO_METHOD_MMAP;
+
+struct buffer {
+        void   *start;
+        size_t length;
+};
+
 struct v4l2_capability	cap;
 struct v4l2_format	fmt;
+struct v4l2_buffer	buf;
+struct v4l2_requestbuffers	req;
+enum v4l2_buf_type	type;
+struct buffer		*buffers;
+int			n_buffers;
 
 double	threshold          =  200.0;
 int	totalTime          =  86400;
 dword	cameraFormat       =  0;
-int	cameraWidth        = -1;
-int	cameraHeight       = -1;
-int	cameraSize         = -1;
-int	cameraBytesperline = -1;
+int	cameraWidth        =  0;
+int	cameraHeight       =  0;
+int	cameraSize         =  0;
+int	cameraBytesperline =  0;
 int	stop               =  0;
 int	verbose            =  0;
 useconds_t	time2sleep =  1000000;
 
 char *g_filename = "image-%05d.jpg";
 
-static const char short_options [] = "d:f:h:m:r:s:T:t:w:vmru?";
+static const char short_options [] = "d:h:m:r:s:T:t:w:v?";
 static struct option long_options[] = {
 	{"device",    required_argument, NULL, 'd'} ,
-	{"format",    required_argument, NULL, 'f'} ,
 	{"height",    required_argument, NULL, 'h'} ,
 	{"help",      no_argument,       NULL, '?'} ,
-	{"mmap",      no_argument,       NULL, 'm'} ,
-	{"read",      no_argument,       NULL, 'r'} ,
 	{"sleep",     required_argument, NULL, 's'} ,
 	{"threshold", required_argument, NULL, 'T'} ,
 	{"time",      required_argument, NULL, 't'} ,
-//	{"userptr",   no_argument,       NULL, 'u'} ,
 	{"verbose",   no_argument,       NULL, 'v'} ,
 	{"width",     required_argument, NULL, 'w'} ,
 	{NULL, 0, 0, 0}
 };
 
-void sighup_handler(int s)
+static void sighup_handler(int s)
 {
 	stop = 1;
 } /* sighup_handler */
+
+/* --- xioctl --- */
+static int xioctl(int fh, int request, void *arg)
+{
+	int r;
+	do {
+		r = v4l2_ioctl(fh, request, arg);
+	} while (r == -1 && ((errno == EINTR) || (errno == EAGAIN)));
+
+	if (r == -1) {
+		perror("xioctl");
+		fprintf(stderr, "error %d, %s\n", errno, strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+	return r;
+} /* xioctl */
 
 /* --- compareFrames --- */
 int compareFrames(byte *frame, byte *prev_frame)
@@ -311,196 +331,16 @@ static	int	idx = 0;
 	return 0;
 } /* saveImage */
 
-#define READ_VIDEO_PIXEL(buf, format, depth, r, g, b)                   \
-{                                                                       \
-	switch (format)                                                 \
-	{                                                               \
-		case V4L2_PIX_FMT_GREY:                                 \
-			switch (depth)                                  \
-			{                                               \
-				case 4:                                 \
-				case 6:                                 \
-				case 8:                                 \
-					(r) = (g) = (b) = (*buf++ << 8);\
-					break;                          \
-									\
-				case 16:                                \
-					(r) = (g) = (b) =               \
-						*((unsigned short *) buf);      \
-					buf += 2;                       \
-					break;                          \
-			}                                               \
-			break;                                          \
-									\
-									\
-		case V4L2_PIX_FMT_RGB565:                               \
-		{                                                       \
-			unsigned short tmp = *(unsigned short *)buf;    \
-			(r) = tmp&0xF800;                               \
-			(g) = (tmp<<5)&0xFC00;                          \
-			(b) = (tmp<<11)&0xF800;                         \
-			buf += 2;                                       \
-		}                                                       \
-		break;                                                  \
-									\
-		case V4L2_PIX_FMT_RGB555:                               \
-			(r) = (buf[0]&0xF8)<<8;                         \
-			(g) = ((buf[0] << 5 | buf[1] >> 3)&0xF8)<<8;    \
-			(b) = ((buf[1] << 2 ) & 0xF8)<<8;               \
-			buf += 2;                                       \
-			break;                                          \
-									\
-		case V4L2_PIX_FMT_RGB24:                                \
-			(r) = buf[0] << 8; (g) = buf[1] << 8;           \
-			(b) = buf[2] << 8;                              \
-			buf += 3;                                       \
-			break;                                          \
-									\
-		default:                                                \
-			fprintf(stderr,                                 \
-				"Format %d not yet supported\n",        \
-				format);                                \
-	}                                                               \
-}
-/* --- yuv2rgb --- */
-static void yuv2rgb(int y, int u, int v, int *r, int *g, int *b)
-{
-	*r = y + (1.370705 * (v-128));
-	*g = y - (0.698001 * (v-128)) - (0.337633 * (u-128));
-	*b = y + (1.732446 * (u-128));
-
-	/* Even with proper conversion, some values still need clipping. */
-	if (*r > 255) *r = 255;
-	if (*g > 255) *g = 255;
-	if (*b > 255) *b = 255;
-	if (*r < 0) *r = 0;
-	if (*g < 0) *g = 0;
-	if (*b < 0) *b = 0;
-
-	/* Values only go from 0-220..  Why? */
-	*r = (*r * 220) / 256;
-	*g = (*g * 220) / 256;
-	*b = (*b * 220) / 256;
-} /* yuv2rgb */
-
-/* --- is_yuv --- */
-static inline int is_yuv()
-{
-	return (
-		(cameraFormat == V4L2_PIX_FMT_YUYV)    ||
-		(cameraFormat == V4L2_PIX_FMT_UYVY)    ||
-		(cameraFormat == V4L2_PIX_FMT_YUV420)  ||
-		(cameraFormat == V4L2_PIX_FMT_YUV422P) ||
-		(cameraFormat == V4L2_PIX_FMT_YUV411P));
-} /* is_yuv */
-
 /* --- capture --- */
-int capture(int fd, byte *buffer, byte *frame)
+int capture(int fd, byte *frame)
 {
-	int	i, row, col;
-	byte	*src, *dst;
-	int	y, u, v, r, g, b, size;
-//	unsigned src_depth = vpic.depth;
+	CLEAR(buf);
+	buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	buf.memory = V4L2_MEMORY_MMAP;
+	xioctl(fd, VIDIOC_DQBUF, &buf);
 
-	// adjust brightness when told so and using some RGB palette
-//	i = 0;
-	//do {
-	int len;
-	if ((len=read(fd, buffer, cameraSize))<0) {
-		perror("capture.read");
-		fprintf(stderr,"RC=%d\n", errno);
-		return TRUE;
-	}
-
-	src = buffer;
-	dst = frame;
-	size = cameraHeight * cameraWidth;
-
-	for (i=row=0; row<cameraHeight; row++)
-		for (col=0; col<cameraWidth; col++, i++) {
-		/*
-		if (!is_yuv(cameraFormat)) {
-			READ_VIDEO_PIXEL(src, cameraFormat, src_depth, r, g, b);
-			*src++ = r;
-			*src++ = g;
-			*src++ = b;
-		}
-		else if (cameraFormat == V4L2_PIX_FMT_UYVY) {
-			if(i==0) v = src[3];
-			if((i%2) == 0) {
-				u = src[0];
-				y = src[1];
-				src += 2;		// v from next 16bit word
-			} else {
-				v = src[0];
-				y = src[1];
-				src += 2;
-			}
-		}
-		*/
-		if (cameraFormat == V4L2_PIX_FMT_YUYV) {
-//			  (cameraFormat == V4L2_PIX_FMT_YUV422)) {
-			if(i==0)
-				v = src[4];
-			if((i%2) == 0) {
-				y = src[0];
-				u = src[1];
-				src += 2;		// v from next 16bit word
-			} else {
-				y = src[0];
-				v = src[1];
-				src += 2;
-			}
-		}
-		/*
-		else if (cameraFormat == V4L2_PIX_FMT_YUV422P) {
-			y = buffer[i];
-			if (i == 0)
-				src = buffer + (cameraWidth*cameraHeight);
-			u = src[(i/2)%(cameraWidth/2)];
-			v = src[(cameraWidth*cameraHeight)/2 + (i/2)%(cameraWidth/2)];
-			if (i && (i%(cameraWidth*2) == 0))
-				src += cameraWidth;
-		}
-		else if(cameraFormat == V4L2_PIX_FMT_YUV411P) {
-			y = buffer[i];
-			if (i == 0)
-				src = buffer + (cameraWidth*cameraHeight);
-			u = src[(i/4)%(cameraWidth/4)];
-			v = src[(cameraWidth*cameraHeight)/4 + (i/4)%(cameraWidth/4)];
-			if (i && (i%(cameraWidth) == 0))
-				src += cameraWidth/4;
-		}
-		else
-		*/
-		//if ((cameraFormat == V4L2_PIX_FMT_YUV420M) ||
-		else
-		if (cameraFormat == V4L2_PIX_FMT_YUV420) {
-			if (i == 0)
-				src = buffer + (cameraWidth*cameraHeight);
-			y = buffer[i];
-			u = src[(i/2)%(cameraWidth/2)];
-			v = src[(size)/4 + (i/2)%(cameraWidth/2)];
-			if (i && (i%(cameraWidth*4)) == 0)
-				src += cameraWidth;
-		}
-		/*
-		else if(cameraFormat == V4L2_PIX_FMT_YUV410P) {
-			if (i == 0)
-				src = buffer + (cameraWidth*cameraHeight);
-			y = buffer[i];
-			u = src[(i/4)%(cameraWidth/4)];
-			v = src[(cameraWidth*cameraHeight)/16 + (i/4)%(cameraWidth/4)];
-			if (i && (i%(cameraWidth*4)) == 0)
-				src += cameraWidth/4;
-		}
-		*/
-		yuv2rgb(y, u, v, &r, &g, &b);
-		*dst++ = r;
-		*dst++ = g;
-		*dst++ = b;
-	}
-	return 0;
+	memcpy(frame, buffers[buf.index].start, buf.bytesused);
+	return xioctl(fd, VIDIOC_QBUF, &buf);
 } /* capture */
 
 /* --- get_options --- */
@@ -534,24 +374,8 @@ void get_options(int argc, char *argv[])
 			case 'h':
 				cameraHeight = atoi(optarg);
 				break;
-			case 'f':
-				cameraFormat = v4l2_fourcc(optarg[0], optarg[1], optarg[2], optarg[3]);
-				break;
 			case 'v':
 				verbose = 1;
-				break;
-			case 'm':
-				io = IO_METHOD_MMAP;
-				fprintf(stderr,"MMAP: Not implemented for the moment\n");
-				exit(0);
-				break;
-			case 'r':
-				io = IO_METHOD_READ;
-				break;
-			case 'u':
-				fprintf(stderr,"USERPTR: Not implemented for the moment\n");
-				io = IO_METHOD_USERPTR;
-				exit(0);
 				break;
 
 			default:
@@ -565,10 +389,7 @@ void get_options(int argc, char *argv[])
 				       "    -t --time      - specifies seconds to run (default: 86400)\n"
 				       "    -w --width #   - camera width to use\n"
 				       "    -h --height #  - camera height to use\n"
-				       "    -f --format #  - change format (look the videodev2.h for fourcc codes)\n"
 				       "    -v --verbose   - be verbose\n"
-				       "    -m --mmap      - Mapping (not implemented)\n"
-				       "    -r --read      - Read method (default)\n"
 				       "    -? --help      - prints this message\n"
 				       "    filename is optional; the default is image%%08d.ppm\n"
 				       "Send SIGHUP to stop smoothly\n\n",
@@ -590,45 +411,29 @@ void get_options(int argc, char *argv[])
 int main(int argc, char *argv[])
 {
 	long	startTime;
-	int	fd;
-	byte	*buffer, *frame, *prev_frame;
+	int	fd, i;
+	byte	*frame, *prev_frame;
 
 	signal(SIGHUP, sighup_handler);
 	get_options(argc, argv);
 
-	fd = open(videodev, O_RDONLY);
+	fd = v4l2_open(videodev, O_RDWR | O_NONBLOCK, 0);
 	if (fd < 0) {
 		perror(videodev);
 		exit(1);
 	}
 
-	memset(&cap, 0, sizeof(cap));
-	memset(&fmt, 0, sizeof(fmt));
+	CLEAR(fmt);
+	CLEAR(cap);
+	CLEAR(req);
 
 	/* Query capabilities */
-	if (ioctl(fd, VIDIOC_QUERYCAP, &cap) < 0) {
-		perror("VIDIOC_QUERYCAP");
-		fprintf(stderr, "Error %d: %s not a video4linux2 device?\n",errno,videodev);
-		close(fd);
-		exit(errno);
-	}
+	xioctl(fd, VIDIOC_QUERYCAP, &cap);
+
 	if (!(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE)) {
 		fprintf(stderr, "Error: %s not a video capture device.\n",videodev);
 		close(fd);
 		exit(errno);
-	}
-	if (io==IO_METHOD_READ) {
-		if (!(cap.capabilities & V4L2_CAP_READWRITE)) {
-			fprintf(stderr, "Error: %s does not support read i/o.\n",videodev);
-			close(fd);
-			exit(errno);
-		}
-	} else {
-		if (!(cap.capabilities & V4L2_CAP_STREAMING)) {
-			fprintf(stderr, "Error: %s does not support streaming i/o.\n",videodev);
-			close(fd);
-			exit(errno);
-		}
 	}
 	printf("\nCapabilities\n");
 	printf("\tdevice:       %s\n",videodev);
@@ -656,15 +461,11 @@ int main(int argc, char *argv[])
 	printf("\t\tStreaming:  %d\n", (cap.capabilities & V4L2_CAP_STREAMING) != 0);
 
 	/* Read capture format */
-	fmt.type  = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	if (ioctl(fd, VIDIOC_G_FMT, &fmt) < 0) {
-		perror("VIDIOC_G_FMT");
-		fprintf(stderr,"RC=%d\n", errno);
-		close(fd);
-		exit(errno);
-	}
+	fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	xioctl(fd, VIDIOC_G_FMT, &fmt);
+
 	/* Setup capture format */
-	printf("\nReport Foramt:\n");
+	printf("\nReport Format:\n");
 	printf("\twidth:        %d\n",fmt.fmt.pix.width);
 	printf("\theight:       %d\n",fmt.fmt.pix.height);
 	printf("\tpixelformat:  %c%c%c%c\n",
@@ -677,26 +478,15 @@ int main(int argc, char *argv[])
 	printf("\tsizeimage:    %d\n",fmt.fmt.pix.sizeimage);
 	printf("\tcolorspace:   %d\n",fmt.fmt.pix.colorspace);
 
-	if (cameraWidth>0)  fmt.fmt.pix.width       = cameraWidth;
-	if (cameraHeight>0) fmt.fmt.pix.height      = cameraHeight;
-	if (cameraFormat>0) fmt.fmt.pix.pixelformat = cameraFormat;
+	if (cameraWidth!=0)  fmt.fmt.pix.width       = cameraWidth;
+	if (cameraHeight!=0) fmt.fmt.pix.height      = cameraHeight;
+	fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_RGB24;
 
-	if (ioctl(fd, VIDIOC_TRY_FMT, &fmt) < 0) {
-		perror("VIDIOC_TRY_FMT");
-		fprintf(stderr,"RC=%d\n", errno);
-		close(fd);
-		exit(errno);
-	}
-
-	if (ioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
-		perror("VIDIOC_S_FMT");
-		fprintf(stderr,"RC=%d\n", errno);
-		close(fd);
-		exit(errno);
-	}
+	/* change the foramt */
+	xioctl(fd, VIDIOC_S_FMT, &fmt);
 
 	/* read back the new information */
-	ioctl(fd, VIDIOC_G_FMT, &fmt);
+	xioctl(fd, VIDIOC_G_FMT, &fmt);
 	cameraWidth        = fmt.fmt.pix.width;
 	cameraHeight       = fmt.fmt.pix.height;
 	cameraSize         = fmt.fmt.pix.sizeimage;
@@ -716,10 +506,50 @@ int main(int argc, char *argv[])
 	printf("\tsizeimage:    %d\n",cameraSize);
 	printf("\tcolorspace:   %d\n",fmt.fmt.pix.colorspace);
 
-	buffer     = malloc(cameraSize);
+
+	/* send capture request */
+	req.count  = 2;
+	req.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	req.memory = V4L2_MEMORY_MMAP;
+	xioctl(fd, VIDIOC_REQBUFS, &req);
+
+	/* create buffers  */
+	buffers = calloc(req.count, sizeof(*buffers));
+	for (n_buffers = 0; n_buffers < req.count; ++n_buffers) {
+		CLEAR(buf);
+
+		buf.type    = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		buf.memory  = V4L2_MEMORY_MMAP;
+		buf.index   = n_buffers;
+
+		xioctl(fd, VIDIOC_QUERYBUF, &buf);
+
+		buffers[n_buffers].length = buf.length;
+		buffers[n_buffers].start = v4l2_mmap(NULL, buf.length,
+				PROT_READ | PROT_WRITE, MAP_SHARED,
+				fd, buf.m.offset);
+
+		if (MAP_FAILED == buffers[n_buffers].start) {
+			perror("mmap");
+			exit(EXIT_FAILURE);
+		}
+        }
+
+	for (i = 0; i < n_buffers; ++i) {
+		CLEAR(buf);
+		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		buf.memory = V4L2_MEMORY_MMAP;
+		buf.index = i;
+		xioctl(fd, VIDIOC_QBUF, &buf);
+	}
+
+	/* Start streaming */
+	type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	xioctl(fd, VIDIOC_STREAMON, &type);
+
 	frame      = malloc(cameraWidth * cameraHeight * 3);	// RGB
 	prev_frame = malloc(cameraWidth * cameraHeight * 3);	// RGB
-	if (!buffer || !frame || !prev_frame) {
+	if (!frame || !prev_frame) {
 		fprintf(stderr, "Out of memory.\n");
 		exit(1);
 	}
@@ -727,7 +557,7 @@ int main(int argc, char *argv[])
 	/*-----------------------------------------------------------------------
 	*  capture one frame
 	*-----------------------------------------------------------------------*/
-	if (capture(fd, buffer, frame)) {
+	if (capture(fd, frame)) {
 		fprintf( stderr, "unable to capture a frame\n");
 		close(fd);
 		exit(2);
@@ -750,7 +580,7 @@ int main(int argc, char *argv[])
 		/*----------------------------------------------------------
 		 *  capture next image
 		 *----------------------------------------------------------*/
-		if (capture(fd, buffer, frame)) {
+		if (capture(fd, frame)) {
 			fprintf( stderr, "unable to capture a frame\n");
 			close(fd);
 			exit(2);
@@ -770,6 +600,14 @@ int main(int argc, char *argv[])
 	/*-----------------------------------------------------------------------
 	 *  Close camera
 	 *-----------------------------------------------------------------------*/
-	 close(fd);
+	type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	xioctl(fd, VIDIOC_STREAMOFF, &type);
+
+	/* close everything */
+	for (i = 0; i < n_buffers; ++i)
+		v4l2_munmap(buffers[i].start, buffers[i].length);
+	v4l2_close(fd);
+	exit(0);
+
 	 return 0;
 } /* main */
