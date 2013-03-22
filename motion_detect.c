@@ -1,7 +1,10 @@
 
 /*
- * $Id: motion_detect.c,v 2.3 2013/03/14 08:28:21 bnv Exp $
+ * $Id: motion_detect.c,v 2.4 2013/03/22 08:17:53 bnv Exp $
  * $Log: motion_detect.c,v $
+ * Revision 2.4  2013/03/22 08:17:53  bnv
+ * Print out of information
+ *
  * Revision 2.3  2013/03/14 08:28:21  bnv
  * Help corrected
  *
@@ -84,7 +87,7 @@ struct v4l2_format	fmt;
 
 double	threshold          =  200.0;
 int	totalTime          =  86400;
-dword	cameraFormat       = -1;
+dword	cameraFormat       =  0;
 int	cameraWidth        = -1;
 int	cameraHeight       = -1;
 int	cameraSize         = -1;
@@ -95,19 +98,20 @@ useconds_t	time2sleep =  1000000;
 
 char *g_filename = "image-%05d.jpg";
 
-static const char short_options [] = "d:T:s:t:w:h:vmru?";
+static const char short_options [] = "d:f:h:m:r:s:T:t:w:vmru?";
 static struct option long_options[] = {
 	{"device",    required_argument, NULL, 'd'} ,
-	{"threshold", required_argument, NULL, 'T'} ,
-	{"sleep",     required_argument, NULL, 's'} ,
-	{"time",      required_argument, NULL, 't'} ,
-	{"width",     required_argument, NULL, 'w'} ,
+	{"format",    required_argument, NULL, 'f'} ,
 	{"height",    required_argument, NULL, 'h'} ,
-	{"verbose",   no_argument,       NULL, 'v'} ,
+	{"help",      no_argument,       NULL, '?'} ,
 	{"mmap",      no_argument,       NULL, 'm'} ,
 	{"read",      no_argument,       NULL, 'r'} ,
-	{"userptr",   no_argument,       NULL, 'u'} ,
-	{"help",      no_argument,       NULL, '?'} ,
+	{"sleep",     required_argument, NULL, 's'} ,
+	{"threshold", required_argument, NULL, 'T'} ,
+	{"time",      required_argument, NULL, 't'} ,
+//	{"userptr",   no_argument,       NULL, 'u'} ,
+	{"verbose",   no_argument,       NULL, 'v'} ,
+	{"width",     required_argument, NULL, 'w'} ,
 	{NULL, 0, 0, 0}
 };
 
@@ -530,6 +534,9 @@ void get_options(int argc, char *argv[])
 			case 'h':
 				cameraHeight = atoi(optarg);
 				break;
+			case 'f':
+				cameraFormat = v4l2_fourcc(optarg[0], optarg[1], optarg[2], optarg[3]);
+				break;
 			case 'v':
 				verbose = 1;
 				break;
@@ -552,14 +559,17 @@ void get_options(int argc, char *argv[])
 				       "%s - grab a color sequence using format0, rgb mode\n\n"
 				       "Usage:\n"
 				       "    %s [--device=/dev/video0]\n\n"
-				       "    --threshold - specifies RMS threshold to use (default: 200)\n"
-				       "    --sleep     - specifies seconds to sleep (default: 1.0)\n"
-				       "    --time      - specifies seconds to run (default: 86400)\n"
-				       "    --width #   - camera width to use\n"
-				       "    --height #  - camera height to use\n"
-				       "    --verbose   - be verbose\n"
-				       "    --mmap      - Mapping (not implemented)\n"
-				       "    --help      - prints this message\n"
+				       "    -d --device #  - specify the video device to use (default: /dev/video0)\n"
+				       "    -T --threshold - specifies RMS threshold to use (default: 200)\n"
+				       "    -s --sleep     - specifies seconds to sleep (default: 1.0)\n"
+				       "    -t --time      - specifies seconds to run (default: 86400)\n"
+				       "    -w --width #   - camera width to use\n"
+				       "    -h --height #  - camera height to use\n"
+				       "    -f --format #  - change format (look the videodev2.h for fourcc codes)\n"
+				       "    -v --verbose   - be verbose\n"
+				       "    -m --mmap      - Mapping (not implemented)\n"
+				       "    -r --read      - Read method (default)\n"
+				       "    -? --help      - prints this message\n"
 				       "    filename is optional; the default is image%%08d.ppm\n"
 				       "Send SIGHUP to stop smoothly\n\n",
 				       argv[0], argv[0]);
@@ -592,8 +602,8 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	memset(&cap,    0, sizeof(cap));
-	memset(&fmt,    0, sizeof(fmt));
+	memset(&cap, 0, sizeof(cap));
+	memset(&fmt, 0, sizeof(fmt));
 
 	/* Query capabilities */
 	if (ioctl(fd, VIDIOC_QUERYCAP, &cap) < 0) {
@@ -627,6 +637,23 @@ int main(int argc, char *argv[])
 	printf("\tbus_info:     %s\n",cap.bus_info);
 	printf("\tversion:      0x%08X\n",cap.version);
 	printf("\tcapabilities: 0x%08X\n",cap.capabilities);
+	printf("\t\tVideo Capture:   %d\n", (cap.capabilities & V4L2_CAP_VIDEO_CAPTURE) != 0);
+	printf("\t\tVideo Output:    %d\n", (cap.capabilities & V4L2_CAP_VIDEO_OUTPUT) != 0);
+	printf("\t\tVideo Overlay:   %d\n", (cap.capabilities & V4L2_CAP_VIDEO_OVERLAY) != 0);
+	printf("\t\tVBI Capture:     %d\n", (cap.capabilities & V4L2_CAP_VBI_CAPTURE) != 0);
+	printf("\t\tVBI Output:      %d\n", (cap.capabilities & V4L2_CAP_VBI_OUTPUT) != 0);
+	printf("\t\tSliced VBI Capt: %d\n", (cap.capabilities & V4L2_CAP_SLICED_VBI_CAPTURE) != 0);
+	printf("\t\tSliced VBI Out:  %d\n", (cap.capabilities & V4L2_CAP_SLICED_VBI_OUTPUT) != 0);
+	printf("\t\tRDS Capture:     %d\n", (cap.capabilities & V4L2_CAP_RDS_CAPTURE) != 0);
+	printf("\t\tVIdeo Output Overlay: %d\n", (cap.capabilities & V4L2_CAP_VIDEO_OUTPUT_OVERLAY) != 0);
+	printf("\t\tHQ Freq:    %d\n", (cap.capabilities & V4L2_CAP_HW_FREQ_SEEK) != 0);
+	printf("\t\tTuner:      %d\n", (cap.capabilities & V4L2_CAP_TUNER) != 0);
+	printf("\t\tAudio:      %d\n", (cap.capabilities & V4L2_CAP_AUDIO) != 0);
+	printf("\t\tRadio:      %d\n", (cap.capabilities & V4L2_CAP_RADIO) != 0);
+	printf("\t\tModulator:  %d\n", (cap.capabilities & V4L2_CAP_MODULATOR) != 0);
+	printf("\t\tReadWrite:  %d\n", (cap.capabilities & V4L2_CAP_READWRITE) != 0);
+	printf("\t\tAsyncIO:    %d\n", (cap.capabilities & V4L2_CAP_ASYNCIO) != 0);
+	printf("\t\tStreaming:  %d\n", (cap.capabilities & V4L2_CAP_STREAMING) != 0);
 
 	/* Read capture format */
 	fmt.type  = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -637,8 +664,29 @@ int main(int argc, char *argv[])
 		exit(errno);
 	}
 	/* Setup capture format */
+	printf("\nReport Foramt:\n");
+	printf("\twidth:        %d\n",fmt.fmt.pix.width);
+	printf("\theight:       %d\n",fmt.fmt.pix.height);
+	printf("\tpixelformat:  %c%c%c%c\n",
+				 fmt.fmt.pix.pixelformat&0xFF,
+				(fmt.fmt.pix.pixelformat>>8)&0xFF,
+				(fmt.fmt.pix.pixelformat>>16)&0xFF,
+				(fmt.fmt.pix.pixelformat>>24)&0xFF);
+	printf("\tfield:        %d\n",fmt.fmt.pix.field);
+	printf("\tbytesperline: %d\n",fmt.fmt.pix.bytesperline);
+	printf("\tsizeimage:    %d\n",fmt.fmt.pix.sizeimage);
+	printf("\tcolorspace:   %d\n",fmt.fmt.pix.colorspace);
+
 	if (cameraWidth>0)  fmt.fmt.pix.width       = cameraWidth;
 	if (cameraHeight>0) fmt.fmt.pix.height      = cameraHeight;
+	if (cameraFormat>0) fmt.fmt.pix.pixelformat = cameraFormat;
+
+	if (ioctl(fd, VIDIOC_TRY_FMT, &fmt) < 0) {
+		perror("VIDIOC_TRY_FMT");
+		fprintf(stderr,"RC=%d\n", errno);
+		close(fd);
+		exit(errno);
+	}
 
 	if (ioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
 		perror("VIDIOC_S_FMT");
