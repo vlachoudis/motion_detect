@@ -1,0 +1,33 @@
+#!/bin/bash
+set -x
+
+HOURS=`echo $1 | cut -f1 -d:`
+MIN=`echo $1 | cut -f2 -d:`
+SEC=`echo $1 | cut -f3 -d:`
+if [ .$HOURS == . ]; then
+	HOURS=1
+fi
+if [ .$MIN == . ]; then
+	MIN=0
+fi
+if [ .$SEC == . ]; then
+	SEC=0
+fi
+
+cd /disk/scratch/Motion
+
+TIME=$(( $HOURS * 3600 + $MIN * 60 + $SEC ))
+
+#NAME=`date +%a_%d%b%y_%H:%M-`
+NAME=`date +%Y.%m.%d_%H:%M-`
+
+$HOME/bin.Linux/motion_detect --width=640 --height=480 --sleep=0.2 --threshold=256 --time=$TIME
+ --verbose
+FILES=`ls image-*.jpg | wc -l`
+if [ $FILES -ge 5 ]; then
+	LC_ALL=C mencoder mf://image-*.jpg -mf fps=6 -o ${NAME}.avi -ovc lavc -lavcopts vcodec=msmpeg4v2:vbitrate=4000
+
+	NEWNAME=${NAME}`date +%H:%M`
+	mv ${NAME}.avi ${NEWNAME}.avi
+fi
+/bin/rm image-*.jpg
