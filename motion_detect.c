@@ -1,4 +1,3 @@
-
 /*
  * $Id: motion_detect.c,v 3.1 2013/03/22 09:21:39 bnv Exp $
  * $Log: motion_detect.c,v $
@@ -103,9 +102,9 @@ int	cameraWidth        =  0;
 int	cameraHeight       =  0;
 int	cameraSize         =  0;
 int	cameraBytesperline =  0;
-int	stop               =  0;
 int	verbose            =  0;
 useconds_t	time2sleep =  1000000;
+volatile int	stop       =  0;
 
 char *g_filename = "image-%05d.jpg";
 
@@ -539,7 +538,7 @@ int main(int argc, char *argv[])
 		}
         }
 
-	for (i = 0; i < n_buffers; ++i) {
+	for (i=0; i<n_buffers; ++i) {
 		CLEAR(buf);
 		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		buf.memory = V4L2_MEMORY_MMAP;
@@ -608,7 +607,7 @@ int main(int argc, char *argv[])
 	xioctl(fd, VIDIOC_STREAMOFF, &type);
 
 	/* close everything */
-	for (i = 0; i < n_buffers; ++i)
+	for (i=0; i < n_buffers; ++i)
 		v4l2_munmap(buffers[i].start, buffers[i].length);
 	v4l2_close(fd);
 	exit(0);
